@@ -1,6 +1,6 @@
 """
 Crypto Options Alpha Bot - Multi Asset Configuration
-BTC + ETH + SOL Support
+WebSocket + Webhook Support
 """
 
 import os
@@ -8,13 +8,32 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-# API Keys
+# Railway specific
+PORT = int(os.getenv('PORT', 8080))
+RAILWAY_STATIC_URL = os.getenv('RAILWAY_STATIC_URL', '')
+
+# API Keys - Use Railway variables
 BINANCE_API_KEY = os.getenv('BINANCE_API_KEY', '')
 BINANCE_API_SECRET = os.getenv('BINANCE_API_SECRET', '')
 COINDCX_API_KEY = os.getenv('COINDCX_API_KEY', '')
 COINDCX_API_SECRET = os.getenv('COINDCX_API_SECRET', '')
+
+# Telegram - Separate bot for alerts
 TELEGRAM_BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN', '')
 TELEGRAM_CHAT_ID = os.getenv('TELEGRAM_CHAT_ID', '')
+
+# Webhook settings
+WEBHOOK_ENABLED = os.getenv('WEBHOOK_ENABLED', 'false').lower() == 'true'
+WEBHOOK_URL = os.getenv('WEBHOOK_URL', '')  # Railway URL
+WEBHOOK_SECRET = os.getenv('WEBHOOK_SECRET', 'your_secret_here')
+
+# WebSocket settings
+WEBSOCKET_ENABLED = True
+WEBSOCKET_RECONNECT_INTERVAL = 5  # seconds
+WEBSOCKET_PING_INTERVAL = 20  # seconds
+
+# Health check
+HEALTH_CHECK_INTERVAL = 30  # seconds
 
 # Multi-Asset Configuration
 ASSETS_CONFIG = {
@@ -23,9 +42,7 @@ ASSETS_CONFIG = {
         'coindcx_symbol': 'BTC-USDT',
         'min_quantity': 0.001,
         'strike_step': 100,
-        'tick_size': 0.01,
-        'volatility_regime': 'medium',
-        'weight': 0.4,
+        'ws_streams': ['btcusdt@trade', 'btcusdt@depth20@100ms'],
         'enable': True
     },
     'ETH': {
@@ -33,9 +50,7 @@ ASSETS_CONFIG = {
         'coindcx_symbol': 'ETH-USDT',
         'min_quantity': 0.01,
         'strike_step': 10,
-        'tick_size': 0.01,
-        'volatility_regime': 'high',
-        'weight': 0.35,
+        'ws_streams': ['ethusdt@trade', 'ethusdt@depth20@100ms'],
         'enable': True
     },
     'SOL': {
@@ -43,9 +58,7 @@ ASSETS_CONFIG = {
         'coindcx_symbol': 'SOL-USDT',
         'min_quantity': 0.1,
         'strike_step': 1,
-        'tick_size': 0.001,
-        'volatility_regime': 'very_high',
-        'weight': 0.25,
+        'ws_streams': ['solusdt@trade', 'solusdt@depth20@100ms'],
         'enable': True
     }
 }
@@ -58,62 +71,27 @@ TRADING_CONFIG = {
     'max_signals_per_asset': 2,
     'max_open_positions': 3,
     'default_risk_per_trade': 0.01,
-    'account_size': 100000,  # USDT
+    'account_size': 100000,
     'min_expiry_hours': 6,
     'max_expiry_hours': 72,
     'correlation_threshold': 0.8,
 }
 
-# Asset-Specific Thresholds
+# Asset Thresholds
 ASSET_THRESHOLDS = {
-    'BTC': {
-        'ofi_threshold': 2.0,
-        'liquidity_sweep_size': 500000,
-        'min_gamma_wall': 1000000,
-        'min_volume_24h': 1000000000,
-    },
-    'ETH': {
-        'ofi_threshold': 1.5,
-        'liquidity_sweep_size': 300000,
-        'min_gamma_wall': 600000,
-        'min_volume_24h': 500000000,
-    },
-    'SOL': {
-        'ofi_threshold': 1.0,
-        'liquidity_sweep_size': 100000,
-        'min_gamma_wall': 200000,
-        'min_volume_24h': 100000000,
-    }
+    'BTC': {'ofi_threshold': 2.0, 'liquidity_sweep_size': 500000, 'min_gamma_wall': 1000000},
+    'ETH': {'ofi_threshold': 1.5, 'liquidity_sweep_size': 300000, 'min_gamma_wall': 600000},
+    'SOL': {'ofi_threshold': 1.0, 'liquidity_sweep_size': 100000, 'min_gamma_wall': 200000}
 }
 
-# Anti-Ban Configuration
+# Anti-Ban
 STEALTH_CONFIG = {
     'enable_jitter': True,
     'min_request_delay': 1.5,
     'max_request_delay': 5.0,
     'max_requests_per_minute': 15,
     'user_agent_rotation': True,
-    'websocket_reconnect': True,
-    'enable_proxy': False,
-    'proxy_list': [],
-}
-
-# Data Configuration
-DATA_CONFIG = {
-    'primary_timeframe': '5m',
-    'secondary_timeframe': '15m',
-    'tertiary_timeframe': '1h',
-    'orderbook_depth': 100,
-    'historical_lookback': 500,
-    'websocket_ping_interval': 30,
-}
-
-# Strategy Weights
-STRATEGY_WEIGHTS = {
-    'liquidity_hunt': 0.35,
-    'gamma_squeeze': 0.30,
-    'delta_arbitrage': 0.20,
-    'whale_footprint': 0.15,
+    'websocket_primary': True,  # Use WebSocket as primary
 }
 
 # Logging
