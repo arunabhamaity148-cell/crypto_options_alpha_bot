@@ -1,6 +1,6 @@
 """
-Crypto Options Alpha Bot - Main Entry Point
-Unique Smart Bot - 70%+ Win Rate
+Crypto Options Alpha Bot - Multi Asset
+BTC + ETH + SOL
 """
 
 import asyncio
@@ -9,33 +9,24 @@ import os
 from datetime import datetime
 from dotenv import load_dotenv
 
-# Load configuration
+load_dotenv()
+
 from config.settings import (
     BINANCE_API_KEY, BINANCE_API_SECRET,
     COINDCX_API_KEY, COINDCX_API_SECRET,
     TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID,
-    TRADING_CONFIG, STEALTH_CONFIG
+    TRADING_CONFIG, STEALTH_CONFIG, ASSETS_CONFIG, ASSET_THRESHOLDS
 )
 
-# Core components
 from core.stealth_request import StealthRequest
 from core.data_aggregator import DataAggregator
-
-# Indicators
-from indicators.microstructure import MicroStructureAnalyzer
+from core.multi_asset_manager import MultiAssetManager, TradingSignal
 from indicators.greeks_engine import GreeksEngine
-
-# Strategies
 from strategies.liquidity_hunt import LiquidityHuntStrategy
 from strategies.gamma_squeeze import GammaSqueezeStrategy
-
-# Signals
 from signals.scorer import AlphaScorer
-
-# Telegram
 from telegram.bot import AlphaTelegramBot
 
-# Setup logging
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
@@ -47,150 +38,216 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 class AlphaBot:
-    """Main bot orchestrator"""
+    """Multi-Asset Alpha Bot"""
     
     def __init__(self):
-        logger.info("🚀 Initializing Alpha Bot...")
+        logger.info("🚀 Starting Multi-Asset Alpha Bot (BTC+ETH+SOL)")
         
-        # Initialize components
         self.stealth = StealthRequest(STEALTH_CONFIG)
-        self.data_agg = DataAggregator(None, None, self.stealth)
-        self.micro_analyzer = MicroStructureAnalyzer()
+        self.data_agg = DataAggregator(self.stealth)
+        self.asset_manager = MultiAssetManager(TRADING_CONFIG, ASSETS_CONFIG)
         self.greeks_engine = GreeksEngine()
         self.scorer = AlphaScorer(TRADING_CONFIG)
-        
-        # Strategies
-        self.liquidity_strategy = LiquidityHuntStrategy(TRADING_CONFIG)
-        self.gamma_strategy = GammaSqueezeStrategy(self.greeks_engine, TRADING_CONFIG)
-        
-        # Telegram
         self.telegram = AlphaTelegramBot(TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID)
         
-        # State
-        self.running = False
-        self.signals_today = 0
-        self.last_reset = datetime.now()
+        # Initialize strategies for each asset
+        self.strategies = {}
+        for asset in TRADING_CONFIG['assets']:
+            thresholds = ASSET_THRESHOLDS.get(asset, ASSET_THRESHOLDS['BTC'])
+            config = {**ASSETS_CONFIG[asset], **thresholds}
+            self.strategies[asset] = {
+                'liquidity': LiquidityHuntStrategy(asset, config),
+                'gamma': GammaSqueezeStrategy(asset, config, self.greeks_engine)
+            }
         
-        logger.info("✅ Bot initialized successfully")
+        self.running = False
+        
+        logger.info("✅ Bot initialized")
     
     async def run(self):
         """Main loop"""
         self.running = True
         
         await self.telegram.send_status(
-            "🟢 Bot started\n"
-            f"Min Score: {TRADING_CONFIG['min_score_threshold']}\n"
-            f"Max Signals/Day: {TRADING_CONFIG['max_signals_per_day']}"
+            "🟢 <b>Multi-Asset Bot Started</b>\n\n"
+            f"Assets: <code>{', '.join(TRADING_CONFIG['assets'])}</code>\n"
+            f"Max Signals: {TRADING_CONFIG['max_signals_per_day']}/day\n"
+            f"Per Asset: {TRADING_CONFIG['max_signals_per_asset']}\n"
+            f"Min Score: {TRADING_CONFIG['min_score_threshold']}"
         )
         
         while self.running:
             try:
-                # Reset daily counter
-                if (datetime.now() - self.last_reset).days >= 1:
-                    self.signals_today = 0
-                    self.last_reset = datetime.now()
-                    logger.info("🌅 Daily counter reset")
+                # Check daily reset
+                if self.asset_manager.should_reset_daily():
+                    self.asset_manager.reset_daily_counters()
                 
-                # Skip if max signals reached
-                if self.signals_today >= TRADING_CONFIG['max_signals_per_day']:
-                    await asyncio.sleep(300)  # 5 min sleep
-                    continue
+                # Fetch all asset data
+                logger.info("📊 Fetching market data...")
+                assets_data = await self.data_agg.get_all_assets_data(ASSETS_CONFIG)
                 
-                # Gather market data
-                logger.info("📊 Gathering market data...")
-                market_data = await self.data_agg.get_comprehensive_snapshot('BTCUSDT')
+                # Analyze each asset
+                signals = []
+                for asset, data in assets_data.items():
+                    if not self.asset_manager.can_send_signal(asset):
+                        continue
+                    
+                    asset_signals = await self._analyze_asset(asset, data)
+                    signals.extend(asset_signals)
                 
-                # Run strategies
-                signals = await self._analyze_strategies(market_data)
+                # Filter and rank
+                if signals:
+                    trading_signals = self._convert_to_trading_signals(signals, assets_data)
+                    filtered = self.asset_manager.filter_correlated_signals(trading_signals)
+                    ranked = sorted(filtered, key=lambda x: x.confidence, reverse=True)
+                    
+                    # Send top signals
+                    for signal in ranked[:TRADING_CONFIG['max_signals_per_day']]:
+                        await self._send_signal(signal, assets_data[signal.asset])
+                        self.asset_manager.record_signal(signal.asset)
+                        await asyncio.sleep(5)
                 
-                # Process signals
-                for signal in signals:
-                    if signal and signal.get('confidence', 0) >= TRADING_CONFIG['min_score_threshold']:
-                        await self._process_signal(signal, market_data)
+                # Status every hour
+                if datetime.now().minute == 0:
+                    await self.telegram.send_status(self.asset_manager.get_asset_status())
                 
-                # Wait before next iteration
-                await asyncio.sleep(60)  # 1 minute between scans
+                logger.info("⏳ Cycle complete. Sleeping...")
+                await asyncio.sleep(60)
                 
             except Exception as e:
                 logger.error(f"Main loop error: {e}")
                 await asyncio.sleep(60)
     
-    async def _analyze_strategies(self, data: Dict) -> list:
-        """Run all strategies"""
+    async def _analyze_asset(self, asset: str, data) -> list:
+        """Analyze single asset"""
         signals = []
         
-        # Strategy 1: Liquidity Hunt
-        liq_signal = await self.liquidity_strategy.analyze(data)
-        if liq_signal:
-            signals.append({
-                'strategy': liq_signal.strategy,
-                'direction': liq_signal.direction,
-                'entry_price': liq_signal.entry_price,
-                'stop_loss': liq_signal.stop_loss,
-                'target_1': liq_signal.target_1,
-                'target_2': liq_signal.target_2,
-                'confidence': liq_signal.confidence,
-                'expiry_suggestion': liq_signal.expiry_suggestion,
-                'strike_selection': liq_signal.strike_selection,
-                'rationale': liq_signal.rationale
-            })
-        
-        # Strategy 2: Gamma Squeeze (needs options chain data)
-        # Mock options chain for demonstration
-        mock_chain = self._generate_mock_chain(data.get('liquidity_data', {}).get('current_price', 65000))
-        gamma_signal = await self.gamma_strategy.analyze(data, mock_chain)
-        if gamma_signal:
-            signals.append(gamma_signal)
+        try:
+            # Get recent trades for CVD
+            trades = await self.data_agg.get_recent_trades(
+                ASSETS_CONFIG[asset]['symbol'], 
+                limit=100
+            )
+            
+            # Run strategies
+            liq = await self.strategies[asset]['liquidity'].analyze(
+                {'orderbook': data.orderbook, 'funding_rate': data.funding_rate}, 
+                trades
+            )
+            if liq:
+                liq['asset'] = asset
+                signals.append(liq)
+            
+            # Mock options chain for gamma
+            chain = self._generate_chain(asset, data.spot_price)
+            gamma = await self.strategies[asset]['gamma'].analyze(
+                {'orderbook': {'mid_price': data.spot_price}, 'funding_rate': data.funding_rate},
+                chain
+            )
+            if gamma:
+                gamma['asset'] = asset
+                signals.append(gamma)
+            
+        except Exception as e:
+            logger.error(f"Error analyzing {asset}: {e}")
         
         return signals
     
-    def _generate_mock_chain(self, spot: float) -> list:
-        """Generate mock options chain for testing"""
-        chain = []
-        base = round(spot / 1000) * 1000
+    def _generate_chain(self, asset: str, spot: float) -> list:
+        """Generate options chain"""
+        import random
+        step = ASSETS_CONFIG[asset]['strike_step']
+        base = round(spot / step) * step
         
-        for i in range(-10, 11):
-            strike = base + (i * 500)
+        chain = []
+        for i in range(-8, 9):
+            strike = base + (i * step)
+            oi = max(10 - abs(i), 2) * 100
             chain.append({
                 'strike': strike,
-                'call_oi': abs(100 - i*10) * 10,
-                'put_oi': abs(100 + i*10) * 10,
+                'call_oi': oi * (1 + random.random()),
+                'put_oi': oi * (1 + random.random()),
                 'call_iv': 0.5 + abs(i) * 0.02,
                 'put_iv': 0.5 + abs(i) * 0.02
             })
         return chain
     
-    async def _process_signal(self, setup: Dict, market_data: Dict):
-        """Process and send high-quality signal"""
+    def _convert_to_trading_signals(self, signals: list, assets_data: dict) -> list:
+        """Convert to TradingSignal objects"""
+        trading_signals = []
         
-        # Calculate alpha score
-        score_data = self.scorer.calculate_score(setup, market_data)
+        for sig in signals:
+            asset = sig['asset']
+            data = assets_data.get(asset)
+            
+            # Calculate position size
+            pos_size = self.asset_manager.calculate_position_size(
+                asset, sig['entry_price'], sig['stop_loss']
+            )
+            sig['position_size'] = pos_size
+            
+            trading_signals.append(TradingSignal(
+                asset=asset,
+                strategy=sig['strategy'],
+                direction=sig['direction'],
+                entry_price=sig['entry_price'],
+                stop_loss=sig['stop_loss'],
+                target_1=sig['target_1'],
+                target_2=sig['target_2'],
+                strike_selection=sig['strike_selection'],
+                expiry_suggestion=sig['expiry_suggestion'],
+                confidence=sig['confidence'],
+                score_breakdown={},
+                rationale=sig['rationale'],
+                timestamp=datetime.now()
+            ))
         
-        # Check if passes threshold
-        if score_data['total_score'] < TRADING_CONFIG['min_score_threshold']:
-            logger.info(f"Signal rejected: Score {score_data['total_score']}")
-            return
+        return trading_signals
+    
+    async def _send_signal(self, signal: TradingSignal, market_data):
+        """Send signal to Telegram"""
         
-        # Send to Telegram
-        await self.telegram.send_signal(setup, score_data, market_data)
-        self.signals_today += 1
+        # Build setup dict
+        setup = {
+            'asset': signal.asset,
+            'strategy': signal.strategy,
+            'direction': signal.direction,
+            'entry_price': signal.entry_price,
+            'stop_loss': signal.stop_loss,
+            'target_1': signal.target_1,
+            'target_2': signal.target_2,
+            'strike_selection': signal.strike_selection,
+            'expiry_suggestion': signal.expiry_suggestion,
+            'rationale': signal.rationale,
+            'position_size': getattr(signal, 'position_size', 0)
+        }
         
-        logger.info(f"✅ Signal sent: {setup['strategy']} | Score: {score_data['total_score']}")
+        # Calculate score
+        market_dict = {
+            'orderbook': market_data.orderbook,
+            'funding_rate': market_data.funding_rate
+        }
+        score_data = self.scorer.calculate_score(setup, market_dict)
+        
+        # Update confidence with real score
+        setup['confidence'] = score_data['total_score']
+        
+        # Only send if passes threshold
+        if score_data['total_score'] >= TRADING_CONFIG['min_score_threshold']:
+            await self.telegram.send_signal(setup, score_data, market_dict)
+            logger.info(f"✅ Signal sent: {signal.asset} {signal.strategy} | Score: {score_data['total_score']}")
+        else:
+            logger.info(f"❌ Signal rejected: {signal.asset} | Score: {score_data['total_score']}")
     
     async def stop(self):
-        """Graceful shutdown"""
         self.running = False
         await self.telegram.send_status("🔴 Bot stopped")
-        logger.info("Bot stopped")
 
 async def main():
-    """Entry point"""
     bot = AlphaBot()
-    
     try:
         await bot.run()
     except KeyboardInterrupt:
-        logger.info("Shutdown requested")
         await bot.stop()
 
 if __name__ == "__main__":
