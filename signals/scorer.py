@@ -1,202 +1,107 @@
 """
 Alpha Score Calculator
-Combines all unique factors into single score
 """
 
-from typing import Dict, List
-import logging
-
-logger = logging.getLogger(__name__)
+from typing import Dict
 
 class AlphaScorer:
-    """
-    Proprietary scoring algorithm
-    Ensures only highest quality signals pass
-    """
+    """Proprietary scoring algorithm"""
     
     def __init__(self, config: Dict):
         self.config = config
         self.weights = {
-            'microstructure': 0.30,
+            'microstructure': 0.35,
             'greeks': 0.25,
             'liquidity': 0.20,
-            'momentum': 0.15,
-            'sentiment': 0.10
+            'momentum': 0.12,
+            'sentiment': 0.08
         }
-        
+    
     def calculate_score(self, setup: Dict, market_data: Dict) -> Dict:
-        """
-        Calculate comprehensive alpha score
-        """
+        """Calculate comprehensive score"""
+        
         scores = {}
         
-        # 1. Microstructure Score (0-100)
+        # Component scores
         scores['microstructure'] = self._score_microstructure(setup, market_data)
-        
-        # 2. Greeks Score (0-100)
         scores['greeks'] = self._score_greeks(setup, market_data)
-        
-        # 3. Liquidity Score (0-100)
         scores['liquidity'] = self._score_liquidity(setup, market_data)
-        
-        # 4. Momentum Score (0-100)
         scores['momentum'] = self._score_momentum(setup, market_data)
-        
-        # 5. Sentiment Score (0-100)
         scores['sentiment'] = self._score_sentiment(setup, market_data)
         
         # Weighted total
-        total_score = sum(
-            scores[k] * self.weights[k] for k in scores
-        )
+        total = sum(scores[k] * self.weights[k] for k in scores)
         
         # Confidence level
-        if total_score >= 90:
+        if total >= 90:
             confidence = 'exceptional'
-        elif total_score >= 85:
+        elif total >= 85:
             confidence = 'high'
-        elif total_score >= 80:
+        elif total >= 80:
             confidence = 'medium'
         else:
             confidence = 'low'
         
         return {
-            'total_score': round(total_score, 1),
+            'total_score': round(total, 1),
             'confidence': confidence,
+            'recommendation': 'strong_take' if total >= 90 else 'take' if total >= 85 else 'pass',
             'component_scores': scores,
-            'recommendation': 'strong_take' if total_score >= 90 else \
-                            'take' if total_score >= 85 else \
-                            'consider' if total_score >= 80 else 'pass',
-            'setup_quality': self._assess_setup_quality(setup, total_score)
+            'setup_quality': 'institutional' if total >= 90 else 'professional' if total >= 85 else 'standard'
         }
     
     def _score_microstructure(self, setup: Dict, data: Dict) -> float:
-        """Score order flow and microstructure"""
-        score = 50
+        score = 60
+        rationale = setup.get('rationale', {})
         
         # OFI strength
-        ofi = abs(data.get('ofi_data', {}).get('ofi_score', 0))
-        score += min(25, ofi * 5)
+        ofi = abs(rationale.get('ofi_ratio', 0))
+        score += min(20, ofi * 50)
         
         # CVD confirmation
-        cvd = data.get('cvd_data', {})
-        if setup.get('direction') == 'long' and cvd.get('cvd', 0) > 0:
+        cvd = rationale.get('cvd_delta', 0)
+        if setup.get('direction') == 'long' and cvd > 0:
             score += 15
-        elif setup.get('direction') == 'short' and cvd.get('cvd', 0) < 0:
+        elif setup.get('direction') == 'short' and cvd < 0:
             score += 15
-        
-        # Trade quality
-        if 'aggressive' in cvd.get('interpretation', ''):
-            score += 10
         
         return min(100, score)
     
     def _score_greeks(self, setup: Dict, data: Dict) -> float:
-        """Score options Greeks alignment"""
-        score = 60
-        
-        # IV rank check (prefer cheap options)
-        # This would need IV history, assume neutral for now
-        score += 10
-        
-        # Gamma squeeze potential
+        score = 65
         if 'gamma_wall' in setup.get('rationale', {}):
-            score += 20
-        
-        # Time to expiry (prefer 24-72h)
-        expiry = setup.get('expiry_suggestion', '')
-        if '24' in expiry or '48' in expiry:
-            score += 10
-        
+            score += 25
         return min(100, score)
     
     def _score_liquidity(self, setup: Dict, data: Dict) -> float:
-        """Score liquidity conditions"""
-        score = 50
+        score = 60
+        ob = data.get('orderbook', {})
         
-        liquidity = data.get('liquidity_data', {})
-        
-        # Spread tightness
-        spread_pct = liquidity.get('spread_pct', 0.1)
-        if spread_pct < 0.05:
-            score += 20
-        elif spread_pct < 0.1:
-            score += 10
-        
-        # Wall strength
-        walls = liquidity.get('bid_walls', []) + liquidity.get('ask_walls', [])
-        if walls:
-            score += 15
-        
-        # Liquidity hunt quality
-        if liquidity.get('hunt_probability') == 'high':
+        spread = ob.get('spread_pct', 0.1)
+        if spread < 0.05:
+            score += 25
+        elif spread < 0.1:
             score += 15
         
         return min(100, score)
     
     def _score_momentum(self, setup: Dict, data: Dict) -> float:
-        """Score momentum alignment"""
-        score = 50
-        
-        # Basis/funding alignment
-        basis = data.get('basis_data', {})
-        funding = basis.get('funding_rate', 0)
-        
+        score = 55
+        # Funding rate check
+        funding = data.get('funding_rate', 0)
         if setup.get('direction') == 'long' and funding < 0:
-            score += 25  # Contrarian long, good
+            score += 30
         elif setup.get('direction') == 'short' and funding > 0:
-            score += 25  # Contrarian short, good
-        else:
-            score += 10  # Neutral
-        
-        # Basis extreme
-        if abs(basis.get('basis', 0)) > 0.005:
-            score += 15
-        
+            score += 30
         return min(100, score)
     
     def _score_sentiment(self, setup: Dict, data: Dict) -> float:
-        """Score market sentiment"""
-        score = 50
+        score = 60
+        ob = data.get('orderbook', {})
+        pressure = ob.get('buy_pressure_pct', 50)
         
-        # Whale activity would go here
-        # For now, use CVD as proxy
-        cvd = data.get('cvd_data', {})
-        buy_pct = cvd.get('buy_pressure_pct', 50)
-        
-        if setup.get('direction') == 'long' and buy_pct > 55:
+        if setup.get('direction') == 'long' and pressure > 55:
             score += 30
-        elif setup.get('direction') == 'short' and buy_pct < 45:
+        elif setup.get('direction') == 'short' and pressure < 45:
             score += 30
-        else:
-            score += 10
-        
         return min(100, score)
-    
-    def _assess_setup_quality(self, setup: Dict, score: float) -> str:
-        """Additional quality assessment"""
-        checks = []
-        
-        # Risk/Reward check
-        risk = abs(setup.get('entry_price', 0) - setup.get('stop_loss', 0))
-        reward = abs(setup.get('target_1', 0) - setup.get('entry_price', 0))
-        
-        if risk > 0 and reward / risk >= 1.5:
-            checks.append('favorable_risk_reward')
-        
-        # Confluence check
-        confluence_count = sum([
-            'sweep' in setup.get('strategy', ''),
-            'gamma' in setup.get('strategy', ''),
-            'ofi' in str(setup.get('rationale', {}))
-        ])
-        
-        if confluence_count >= 2:
-            checks.append('multi_factor_confluence')
-        
-        if score >= 90 and len(checks) >= 2:
-            return 'institutional_grade'
-        elif score >= 85:
-            return 'professional_grade'
-        else:
-            return 'standard'
