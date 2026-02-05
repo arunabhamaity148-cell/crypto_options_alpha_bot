@@ -1,6 +1,6 @@
 """
-Crypto Options Alpha Bot - Configuration
-Unique Smart Bot - 70%+ Win Rate
+Crypto Options Alpha Bot - Multi Asset Configuration
+BTC + ETH + SOL Support
 """
 
 import os
@@ -8,72 +8,117 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-# API Configuration
+# API Keys
 BINANCE_API_KEY = os.getenv('BINANCE_API_KEY', '')
 BINANCE_API_SECRET = os.getenv('BINANCE_API_SECRET', '')
 COINDCX_API_KEY = os.getenv('COINDCX_API_KEY', '')
 COINDCX_API_SECRET = os.getenv('COINDCX_API_SECRET', '')
-
-# Telegram
 TELEGRAM_BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN', '')
 TELEGRAM_CHAT_ID = os.getenv('TELEGRAM_CHAT_ID', '')
 
-# Trading Parameters
+# Multi-Asset Configuration
+ASSETS_CONFIG = {
+    'BTC': {
+        'symbol': 'BTCUSDT',
+        'coindcx_symbol': 'BTC-USDT',
+        'min_quantity': 0.001,
+        'strike_step': 100,
+        'tick_size': 0.01,
+        'volatility_regime': 'medium',
+        'weight': 0.4,
+        'enable': True
+    },
+    'ETH': {
+        'symbol': 'ETHUSDT',
+        'coindcx_symbol': 'ETH-USDT',
+        'min_quantity': 0.01,
+        'strike_step': 10,
+        'tick_size': 0.01,
+        'volatility_regime': 'high',
+        'weight': 0.35,
+        'enable': True
+    },
+    'SOL': {
+        'symbol': 'SOLUSDT',
+        'coindcx_symbol': 'SOL-USDT',
+        'min_quantity': 0.1,
+        'strike_step': 1,
+        'tick_size': 0.001,
+        'volatility_regime': 'very_high',
+        'weight': 0.25,
+        'enable': True
+    }
+}
+
+# Trading Configuration
 TRADING_CONFIG = {
-    'primary_asset': 'BTC',
-    'quote_asset': 'USDT',
-    'min_score_threshold': 85,      # Alpha score minimum
-    'max_signals_per_day': 3,       # Quality over quantity
-    'max_open_positions': 2,        # Risk management
-    'default_risk_per_trade': 0.01,  # 1% capital risk
+    'assets': ['BTC', 'ETH', 'SOL'],
+    'min_score_threshold': 85,
+    'max_signals_per_day': 6,
+    'max_signals_per_asset': 2,
+    'max_open_positions': 3,
+    'default_risk_per_trade': 0.01,
+    'account_size': 100000,  # USDT
     'min_expiry_hours': 6,
     'max_expiry_hours': 72,
+    'correlation_threshold': 0.8,
+}
+
+# Asset-Specific Thresholds
+ASSET_THRESHOLDS = {
+    'BTC': {
+        'ofi_threshold': 2.0,
+        'liquidity_sweep_size': 500000,
+        'min_gamma_wall': 1000000,
+        'min_volume_24h': 1000000000,
+    },
+    'ETH': {
+        'ofi_threshold': 1.5,
+        'liquidity_sweep_size': 300000,
+        'min_gamma_wall': 600000,
+        'min_volume_24h': 500000000,
+    },
+    'SOL': {
+        'ofi_threshold': 1.0,
+        'liquidity_sweep_size': 100000,
+        'min_gamma_wall': 200000,
+        'min_volume_24h': 100000000,
+    }
 }
 
 # Anti-Ban Configuration
 STEALTH_CONFIG = {
     'enable_jitter': True,
-    'min_request_delay': 1.0,
+    'min_request_delay': 1.5,
     'max_request_delay': 5.0,
     'max_requests_per_minute': 15,
     'user_agent_rotation': True,
     'websocket_reconnect': True,
-    'enable_proxy': False,  # Set True if using proxy
+    'enable_proxy': False,
+    'proxy_list': [],
 }
 
-# Data Sources
+# Data Configuration
 DATA_CONFIG = {
     'primary_timeframe': '5m',
     'secondary_timeframe': '15m',
     'tertiary_timeframe': '1h',
     'orderbook_depth': 100,
-    'historical_lookback': 500,  # candles
+    'historical_lookback': 500,
     'websocket_ping_interval': 30,
 }
 
-# Strategy Weights (for scoring)
+# Strategy Weights
 STRATEGY_WEIGHTS = {
-    'liquidity_hunt': 0.30,
-    'gamma_squeeze': 0.25,
-    'delta_arbitrage': 0.25,
-    'whale_footprint': 0.20,
-}
-
-# Unique Indicator Thresholds
-ALPHA_THRESHOLDS = {
-    'ofi_threshold': 2.0,           # Order flow imbalance
-    'cvd_divergence_min': 0.5,      # CVD divergence strength
-    'liquidity_sweep_size': 500000, # Min sweep in USD
-    'gamma_wall_proximity': 0.02,   # 2% from gamma wall
-    'iv_percentile_max': 50,        # Cheap options only
-    'basis_arbitrage_min': 0.003,   # 0.3% mispricing
-    'whale_threshold_btc': 100,     # Min whale size
+    'liquidity_hunt': 0.35,
+    'gamma_squeeze': 0.30,
+    'delta_arbitrage': 0.20,
+    'whale_footprint': 0.15,
 }
 
 # Logging
 LOG_CONFIG = {
     'level': 'INFO',
-    'file': 'bot_activity.log',
-    'max_size': 10 * 1024 * 1024,  # 10MB
-    'backup_count': 5,
+    'file': 'bot.log',
+    'format': '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 }
