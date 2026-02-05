@@ -1,192 +1,182 @@
 """
-Advanced Microstructure Indicators
-Unique calculations not found in public bots
+Microstructure Analysis - OFI, CVD, Liquidity
 """
 
 import numpy as np
-import pandas as pd
-from typing import Dict, List, Tuple
+from typing import Dict, Optional, List
 from dataclasses import dataclass
 import logging
 
 logger = logging.getLogger(__name__)
 
 @dataclass
-class MicroStructureSignal:
-    signal_type: str  # 'liquidity_hunt', 'ofi_flip', 'cvd_divergence'
-    strength: float   # 0-100
-    direction: str    # 'long', 'short'
-    entry_zone: Tuple[float, float]
+class MicroSignal:
+    signal_type: str
+    direction: str
+    strength: float
+    entry_zone: tuple
     stop_loss: float
     targets: List[float]
-    confidence: str   # 'high', 'medium', 'low'
     metadata: Dict
 
-class MicroStructureAnalyzer:
-    """Detects institutional order flow patterns"""
+class MicrostructureAnalyzer:
+    """Advanced microstructure analysis"""
     
-    def __init__(self):
-        self.price_history = []
-        self.cvd_history = []
-        self.ofi_history = []
+    def analyze(self, asset: str, orderbook: Dict, recent_trades: List[Dict]) -> Optional[MicroSignal]:
+        """Main analysis entry point"""
         
-    def detect_liquidity_hunt(self, data: Dict) -> MicroStructureSignal:
-        """
-        Detects when price sweeps liquidity and reverses
-        75%+ win rate setup
-        """
-        liquidity = data.get('liquidity_data', {})
-        ofi = data.get('ofi_data', {})
-        cvd = data.get('cvd_data', {})
+        # Calculate CVD
+        cvd_data = self._calculate_cvd(recent_trades, orderbook.get('mid_price', 0))
         
-        current_price = liquidity.get('current_price', 0)
-        hunt_below = liquidity.get('liquidity_void_below')
-        hunt_above = liquidity.get('liquidity_void_above')
+        # Get OFI from orderbook
+        ofi = orderbook.get('ofi_ratio', 0)
         
-        # Check for sweep below + reversal
-        if hunt_below and current_price > hunt_below * 1.002:
-            # Price swept below and came back up
-            ofi_score = ofi.get('ofi_score', 0)
-            cvd_interp = cvd.get('interpretation', '')
-            
-            if ofi_score > 1.5 and 'buying' in cvd_interp:
-                return MicroStructureSignal(
-                    signal_type='liquidity_hunt_long',
-                    strength=min(95, 70 + ofi_score * 5),
-                    direction='long',
-                    entry_zone=(current_price * 0.998, current_price * 1.002),
-                    stop_loss=hunt_below * 0.995,
-                    targets=[current_price * 1.015, current_price * 1.03],
-                    confidence='high' if ofi_score > 2.5 else 'medium',
-                    metadata={
-                        'sweep_level': hunt_below,
-                        'ofi_score': ofi_score,
-                        'cvd_delta': cvd.get('cvd', 0),
-                        'wall_above': liquidity.get('largest_ask_wall')
-                    }
-                )
+        # Check for liquidity sweep
+        sweep = self._detect_liquidity_sweep(orderbook, cvd_data)
         
-        # Check for sweep above + reversal
-        if hunt_above and current_price < hunt_above * 0.998:
-            ofi_score = ofi.get('ofi_score', 0)
-            cvd_interp = cvd.get('interpretation', '')
-            
-            if ofi_score < -1.5 and 'selling' in cvd_interp:
-                return MicroStructureSignal(
-                    signal_type='liquidity_hunt_short',
-                    strength=min(95, 70 + abs(ofi_score) * 5),
-                    direction='short',
-                    entry_zone=(current_price * 0.998, current_price * 1.002),
-                    stop_loss=hunt_above * 1.005,
-                    targets=[current_price * 0.985, current_price * 0.97],
-                    confidence='high' if ofi_score < -2.5 else 'medium',
-                    metadata={
-                        'sweep_level': hunt_above,
-                        'ofi_score': ofi_score,
-                        'cvd_delta': cvd.get('cvd', 0),
-                        'wall_below': liquidity.get('largest_bid_wall')
-                    }
-                )
+        if sweep:
+            return self._build_signal(asset, sweep, ofi, cvd_data, orderbook)
+        
+        # Check for OFI momentum flip
+        flip = self._detect_ofi_flip(ofi, orderbook)
+        if flip:
+            return self._build_flip_signal(asset, flip, orderbook)
         
         return None
     
-    def detect_ofi_momentum_flip(self, data: Dict, history: List[Dict]) -> MicroStructureSignal:
-        """
-        Detects when order flow momentum flips
-        Early trend detection
-        """
-        if len(history) < 3:
-            return None
-            
-        ofi_current = data.get('ofi_data', {}).get('ofi_score', 0)
-        ofi_previous = [h.get('ofi_data', {}).get('ofi_score', 0) for h in history[-3:]]
+    def _calculate_cvd(self, trades: List[Dict], mid_price: float) -> Dict:
+        """Calculate Cumulative Volume Delta"""
         
-        # Bullish flip: negative to strong positive
-        if ofi_current > 2.0 and all(o < 0 for o in ofi_previous):
-            current_price = data.get('liquidity_data', {}).get('current_price', 0)
-            
-            return MicroStructureSignal(
-                signal_type='ofi_bullish_flip',
-                strength=min(90, 60 + ofi_current * 10),
-                direction='long',
-                entry_zone=(current_price * 0.999, current_price * 1.001),
-                stop_loss=current_price * 0.988,
-                targets=[current_price * 1.02, current_price * 1.04],
-                confidence='high',
-                metadata={
-                    'ofi_previous': ofi_previous,
-                    'ofi_current': ofi_current,
-                    'flip_magnitude': ofi_current - min(ofi_previous)
-                }
-            )
+        buy_volume = 0
+        sell_volume = 0
         
-        # Bearish flip: positive to strong negative
-        if ofi_current < -2.0 and all(o > 0 for o in ofi_previous):
-            current_price = data.get('liquidity_data', {}).get('current_price', 0)
+        for trade in trades:
+            price = float(trade.get('price', 0))
+            qty = float(trade.get('qty', 0))
+            is_buyer_maker = trade.get('isBuyerMaker', False)
             
-            return MicroStructureSignal(
-                signal_type='ofi_bearish_flip',
-                strength=min(90, 60 + abs(ofi_current) * 10),
-                direction='short',
-                entry_zone=(current_price * 0.999, current_price * 1.001),
-                stop_loss=current_price * 1.012,
-                targets=[current_price * 0.98, current_price * 0.96],
-                confidence='high',
-                metadata={
-                    'ofi_previous': ofi_previous,
-                    'ofi_current': ofi_current,
-                    'flip_magnitude': max(ofi_previous) - ofi_current
+            if is_buyer_maker:
+                sell_volume += qty * price
+            else:
+                buy_volume += qty * price
+        
+        total = buy_volume + sell_volume
+        cvd = buy_volume - sell_volume
+        
+        return {
+            'cvd': cvd,
+            'buy_volume': buy_volume,
+            'sell_volume': sell_volume,
+            'delta_ratio': cvd / total if total > 0 else 0,
+            'buy_pressure_pct': (buy_volume / total * 100) if total > 0 else 50,
+            'interpretation': 'aggressive_buying' if cvd > total * 0.1 else 
+                             'aggressive_selling' if cvd < -total * 0.1 else 'neutral'
+        }
+    
+    def _detect_liquidity_sweep(self, orderbook: Dict, cvd: Dict) -> Optional[Dict]:
+        """Detect liquidity sweep pattern"""
+        
+        mid = orderbook.get('mid_price', 0)
+        voids_below = orderbook.get('liquidity_voids_below', [])
+        voids_above = orderbook.get('liquidity_voids_above', [])
+        
+        # Check sweep below + reversal
+        if voids_below and cvd.get('delta_ratio', 0) > 0.2:
+            sweep_price = voids_below[0][0]
+            # Price came back above sweep level
+            above sweep level
+            if mid > sweep_price * 1.002:
+                return {
+                    'type': 'sweep_low',
+                    'sweep_price': sweep_price,
+                    'direction': 'long',
+                    'strength': min(95, 70 + cvd.get('delta_ratio', 0) * 50)
                 }
-            )
+        
+        # Check sweep above + reversal
+        if voids_above and cvd.get('delta_ratio', 0) < -0.2:
+            sweep_price = voids_above[0][0]
+            if mid < sweep_price * 0.998:
+                return {
+                    'type': 'sweep_high',
+                    'sweep_price': sweep_price,
+                    'direction': 'short',
+                    'strength': min(95, 70 + abs(cvd.get('delta_ratio', 0)) * 50)
+                }
         
         return None
     
-    def detect_cvd_divergence(self, data: Dict, price_history: List[float], cvd_history: List[float]) -> MicroStructureSignal:
-        """
-        Detects divergence between price and CVD
-        Hidden accumulation/distribution
-        """
-        if len(price_history) < 10 or len(cvd_history) < 10:
-            return None
-            
-        # Calculate trends
-        price_trend = np.polyfit(range(5), price_history[-5:], 1)[0]
-        cvd_trend = np.polyfit(range(5), cvd_history[-5:], 1)[0]
-        
-        current_price = price_history[-1]
-        
-        # Bullish divergence: Price down, CVD up (accumulation)
-        if price_trend < -0.1 and cvd_trend > 0.5:
-            return MicroStructureSignal(
-                signal_type='cvd_bullish_divergence',
-                strength=85,
-                direction='long',
-                entry_zone=(current_price * 0.997, current_price),
-                stop_loss=current_price * 0.985,
-                targets=[current_price * 1.025, current_price * 1.05],
-                confidence='high',
-                metadata={
-                    'price_trend': price_trend,
-                    'cvd_trend': cvd_trend,
-                    'divergence_strength': cvd_trend - price_trend
-                }
-            )
-        
-        # Bearish divergence: Price up, CVD down (distribution)
-        if price_trend > 0.1 and cvd_trend < -0.5:
-            return MicroStructureSignal(
-                signal_type='cvd_bearish_divergence',
-                strength=85,
-                direction='short',
-                entry_zone=(current_price, current_price * 1.003),
-                stop_loss=current_price * 1.015,
-                targets=[current_price * 0.975, current_price * 0.95],
-                confidence='high',
-                metadata={
-                    'price_trend': price_trend,
-                    'cvd_trend': cvd_trend,
-                    'divergence_strength': price_trend - cvd_trend
-                }
-            )
-        
+    def _detect_ofi_flip(self, ofi: float, orderbook: Dict) -> Optional[Dict]:
+        """Detect OFI momentum flip"""
+        # Simplified - would need history in production
+        if abs(ofi) > 0.3:
+            return {
+                'type': 'ofi_extreme',
+                'direction': 'long' if ofi > 0 else 'short',
+                'strength': min(90, 60 + abs(ofi) * 100)
+            }
         return None
+    
+    def _build_signal(self, asset: str, sweep: Dict, ofi: float, cvd: Dict, ob: Dict) -> MicroSignal:
+        """Build complete signal from sweep detection"""
+        
+        direction = sweep['direction']
+        mid = ob.get('mid_price', 0)
+        sweep_price = sweep['sweep_price']
+        
+        if direction == 'long':
+            entry = mid
+            stop = sweep_price * 0.995
+            target1 = mid + (mid - stop) * 1.5
+            target2 = mid + (mid - stop) * 2.5
+        else:
+            entry = mid
+            stop = sweep_price * 1.005
+            target1 = mid - (stop - mid) * 1.5
+            target2 = mid - (stop - mid) * 2.5
+        
+        return MicroSignal(
+            signal_type=f"liquidity_{sweep['type']}",
+            direction=direction,
+            strength=sweep['strength'],
+            entry_zone=(entry * 0.998, entry * 1.002),
+            stop_loss=stop,
+            targets=[target1, target2],
+            metadata={
+                'ofi_ratio': ofi,
+                'cvd_delta': cvd.get('cvd', 0),
+                'sweep_price': sweep_price,
+                'bid_walls': ob.get('bid_walls', []),
+                'ask_walls': ob.get('ask_walls', [])
+            }
+        )
+    
+    def _build_flip_signal(self, asset: str, flip: Dict, ob: Dict) -> MicroSignal:
+        """Build signal from OFI flip"""
+        
+        direction = flip['direction']
+        mid = ob.get('mid_price', 0)
+        
+        if direction == 'long':
+            entry = mid
+            stop = mid * 0.985
+            target1 = mid * 1.02
+            target2 = mid * 1.04
+        else:
+            entry = mid
+            stop = mid * 1.015
+            target1 = mid * 0.98
+            target2 = mid * 0.96
+        
+        return MicroSignal(
+            signal_type='ofi_momentum_flip',
+            direction=direction,
+            strength=flip['strength'],
+            entry_zone=(entry * 0.999, entry * 1.001),
+            stop_loss=stop,
+            targets=[target1, target2],
+            metadata={
+                'ofi_extreme': True,
+                'pressure_direction': direction
+            }
+        )
