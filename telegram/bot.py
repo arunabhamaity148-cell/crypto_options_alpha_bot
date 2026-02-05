@@ -1,166 +1,131 @@
 """
-Telegram Bot Interface
-Rich formatting with charts and context
+Telegram Bot - Multi Asset
 """
 
 import asyncio
 import logging
 from typing import Dict
-from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.constants import ParseMode
+from telegram import Bot, ParseMode
 import matplotlib.pyplot as plt
 import io
-import base64
 
 logger = logging.getLogger(__name__)
 
 class AlphaTelegramBot:
-    """Sends high-quality signals to Telegram"""
     
     def __init__(self, token: str, chat_id: str):
         self.bot = Bot(token=token)
         self.chat_id = chat_id
-        self.message_count = 0
-        
-    async def send_signal(self, setup: Dict, score_data: Dict, market_data: Dict):
-        """Send formatted signal message"""
-        
+    
+    async def send_signal(self, setup: Dict, score: Dict, market_data: Dict):
+        """Send signal"""
         try:
-            message = self._format_message(setup, score_data, market_data)
-            
-            # Send text
+            message = self._format_message(setup, score, market_data)
             await self.bot.send_message(
                 chat_id=self.chat_id,
                 text=message,
-                parse_mode=ParseMode.HTML,
-                disable_web_page_preview=True
+                parse_mode=ParseMode.HTML
             )
             
-            # Send chart if available
-            chart = self._generate_chart(setup, market_data)
+            chart = self._generate_chart(setup)
             if chart:
-                await self.bot.send_photo(
-                    chat_id=self.chat_id,
-                    photo=chart,
-                    caption="📊 Setup Visualization"
-                )
-            
-            self.message_count += 1
-            logger.info(f"Signal sent: {setup.get('strategy')} {setup.get('direction')}")
-            
+                await self.bot.send_photo(chat_id=self.chat_id, photo=chart)
+                
         except Exception as e:
-            logger.error(f"Telegram send error: {e}")
+            logger.error(f"Send error: {e}")
     
     def _format_message(self, setup: Dict, score: Dict, data: Dict) -> str:
-        """Format rich HTML message"""
+        asset = setup.get('asset', 'BTC')
+        direction = setup.get('direction', 'long')
         
-        direction_emoji = "🟢" if setup.get('direction') == 'long' else "🔴"
-        confidence_emoji = "⭐⭐⭐⭐⭐" if score.get('total_score', 0) >= 90 else \
-                          "⭐⭐⭐⭐" if score.get('total_score', 0) >= 85 else \
-                          "⭐⭐⭐"
+        emojis = {'BTC': '₿', 'ETH': 'Ξ', 'SOL': '◎'}
+        asset_emoji = emojis.get(asset, '💰')
+        dir_emoji = "🟢" if direction == 'long' else "🔴"
+        total_score = score.get('total_score', 0)
+        stars = "⭐" * int(total_score / 20)
         
         message = f"""
-{direction_emoji} <b>ALPHA SIGNAL: {setup.get('strategy', '').upper().replace('_', ' ')}</b>
+{dir_emoji} <b>{asset} ALPHA SIGNAL</b> {asset_emoji}
 
-🪙 <b>Asset:</b> BTC-USDT Options
-📈 <b>Direction:</b> {setup.get('direction', '').upper()}
-💰 <b>Strike:</b> {setup.get('strike_selection', 'ATM')}
-⏳ <b>Expiry:</b> {setup.get('expiry_suggestion', '24-48h')}
+<b>Strategy:</b> <code>{setup.get('strategy', '').replace('_', ' ').title()}</code>
+<b>Direction:</b> {direction.upper()}
+<b>Strike:</b> <code>{setup.get('strike_selection', 'ATM')}</code>
+<b>Expiry:</b> {setup.get('expiry_suggestion', '24h')}
 
 <b>━━━━━━━━━━━━━━━━━━━━━</b>
-📊 <b>ALPHA SCORE: {score.get('total_score', 0)}/100</b> {confidence_emoji}
-<b>Quality:</b> {score.get('setup_quality', 'standard').replace('_', ' ').title()}
+🎯 <b>ALPHA SCORE: {total_score}/100</b> {stars}
+<b>Quality:</b> {score.get('setup_quality', 'standard').title()}
 <b>Verdict:</b> {score.get('recommendation', 'pass').upper()}
 <b>━━━━━━━━━━━━━━━━━━━━━</b>
 
-💰 <b>EXECUTION PLAN</b>
-├ Entry Zone: <code>{setup.get('entry_price', 0)}</code>
-├ Stop Loss: <code>{setup.get('stop_loss', 0)}</code> ({self._calc_risk(setup)}%)
-├ Target 1: <code>{setup.get('target_1', 0)}</code> (1.5R)
-└ Target 2: <code>{setup.get('target_2', 0)}</code> (2.5R)
+💰 <b>TRADE PLAN</b>
+├ Entry: <code>{setup.get('entry_price', 0)}</code>
+├ Stop: <code>{setup.get('stop_loss', 0)}</code> ({self._calc_risk(setup)}%)
+├ Target 1: <code>{setup.get('target_1', 0)}</code>
+├ Target 2: <code>{setup.get('target_2', 0)}</code>
+└ Position: <code>{setup.get('position_size', 0)} {asset}</code>
 
 <b>━━━━━━━━━━━━━━━━━━━━━</b>
-🔬 <b>CONFLUENCE ANALYSIS</b>
+🔬 <b>RATIONALE</b>
 """
-        
-        # Add rationale
         rationale = setup.get('rationale', {})
-        for key, value in rationale.items():
-            message += f"\n├ <i>{key.replace('_', ' ').title()}:</i> <code>{value}</code>"
-        
-        # Add component scores
+        for key, value in list(rationale.items())[:4]:
+            message += f"\n├ <i>{key.replace('_', ' ').title()}:</i> <code>{str(value)[:40]}</code>"
+
+        components = score.get('component_scores', {})
         message += f"""
 
 <b>━━━━━━━━━━━━━━━━━━━━━</b>
-📈 <b>COMPONENT SCORES</b>
-├ Microstructure: {score.get('component_scores', {}).get('microstructure', 0)}/100
-├ Greeks: {score.get('component_scores', {}).get('greeks', 0)}/100
-├ Liquidity: {score.get('component_scores', {}).get('liquidity', 0)}/100
-├ Momentum: {score.get('component_scores', {}).get('momentum', 0)}/100
-└ Sentiment: {score.get('component_scores', {}).get('sentiment', 0)}/100
+📊 <b>SCORES</b>
+├ Micro: {components.get('microstructure', 0)}/100
+├ Greeks: {components.get('greeks', 0)}/100
+├ Liquidity: {components.get('liquidity', 0)}/100
+├ Momentum: {components.get('momentum', 0)}/100
+└ Sentiment: {components.get('sentiment', 0)}/100
 
-<b>━━━━━━━━━━━━━━━━━━━━━</b>
-⚠️ <b>RISK MANAGEMENT</b>
-├ Risk per trade: 1% max
-├ Position sizing: Adjust to SL
-├ Valid for: 60 minutes
-└ No trade if spread > 0.5%
-
-<i>Generated by Alpha Bot v1.0 | Unique Microstructure Analysis</i>
+⏱ <b>Valid:</b> 60 min | ⚠️ <b>Risk:</b> 1% max
+<i>Alpha Bot v2.0 | Multi-Asset</i>
 """
         return message
     
     def _calc_risk(self, setup: Dict) -> float:
-        """Calculate risk percentage"""
         entry = setup.get('entry_price', 0)
         stop = setup.get('stop_loss', 0)
         if entry == 0:
             return 0
         return round(abs(entry - stop) / entry * 100, 2)
     
-    def _generate_chart(self, setup: Dict, data: Dict) -> bytes:
-        """Generate setup visualization chart"""
+    def _generate_chart(self, setup: Dict) -> bytes:
         try:
-            fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(10, 8), 
-                                           gridspec_kw={'height_ratios': [3, 1]})
+            fig, ax = plt.subplots(figsize=(10, 6))
             
-            # Price chart with levels
+            asset = setup.get('asset', 'BTC')
             current = setup.get('entry_price', 0)
             stop = setup.get('stop_loss', 0)
-            target1 = setup.get('target_1', 0)
-            target2 = setup.get('target_2', 0)
+            t1 = setup.get('target_1', 0)
+            t2 = setup.get('target_2', 0)
             
-            # Mock price path (would be real in production)
             x = range(20)
-            y = [current * (1 + (i-10)*0.001) for i in x]
+            y = [current * (1 + (i-10)*0.002) for i in x]
             
-            ax1.plot(x, y, 'b-', linewidth=2, label='Price Action')
-            ax1.axhline(y=current, color='blue', linestyle='--', alpha=0.7, label='Entry')
-            ax1.axhline(y=stop, color='red', linestyle='--', alpha=0.7, label='Stop')
-            ax1.axhline(y=target1, color='green', linestyle='--', alpha=0.7, label='Target 1')
-            ax1.axhline(y=target2, color='darkgreen', linestyle='--', alpha=0.7, label='Target 2')
+            ax.plot(x, y, 'b-', linewidth=2, label=f'{asset} Price')
+            ax.axhline(y=current, color='blue', linestyle='--', alpha=0.7, label='Entry')
+            ax.axhline(y=stop, color='red', linestyle='--', alpha=0.7, label='Stop')
+            ax.axhline(y=t1, color='green', linestyle='--', alpha=0.7, label='T1')
+            ax.axhline(y=t2, color='darkgreen', linestyle='--', alpha=0.7, label='T2')
             
-            # Fill zones
             if setup.get('direction') == 'long':
-                ax1.fill_between(x, stop, current, alpha=0.2, color='red', label='Risk Zone')
-                ax1.fill_between(x, current, target2, alpha=0.2, color='green', label='Reward Zone')
+                ax.fill_between(x, stop, current, alpha=0.2, color='red')
+                ax.fill_between(x, current, t2, alpha=0.2, color='green')
             else:
-                ax1.fill_between(x, current, stop, alpha=0.2, color='red')
-                ax1.fill_between(x, target2, current, alpha=0.2, color='green')
+                ax.fill_between(x, current, stop, alpha=0.2, color='red')
+                ax.fill_between(x, t2, current, alpha=0.2, color='green')
             
-            ax1.set_title(f"Setup: {setup.get('strategy', '').replace('_', ' ').title()}", 
-                         fontsize=14, fontweight='bold')
-            ax1.legend(loc='upper left')
-            ax1.grid(True, alpha=0.3)
+            ax.set_title(f"{asset} {setup.get('strategy', '').replace('_', ' ').title()}", 
+                        fontsize=14, fontweight='bold')
+            ax.legend()
+            ax.grid(True, alpha=0.3)
             
-            # Volume/CVD subplot
-            ax2.bar(x, [abs(i-10) for i in x], alpha=0.6, color='gray')
-            ax2.set_title('Volume Profile')
-            ax2.grid(True, alpha=0.3)
-            
-            plt.tight_layout()
-            
-            # Save to bytes
             buf = io.BytesIO()
             plt.savefig(buf, format='png', dpi=150, bbox_inches='tight')
             buf.seek(0)
@@ -169,16 +134,15 @@ class AlphaTelegramBot:
             return buf
             
         except Exception as e:
-            logger.error(f"Chart generation error: {e}")
+            logger.error(f"Chart error: {e}")
             return None
     
     async def send_status(self, message: str):
-        """Send status update"""
         try:
             await self.bot.send_message(
                 chat_id=self.chat_id,
-                text=f"ℹ️ <b>Bot Status</b>\n\n{message}",
+                text=message,
                 parse_mode=ParseMode.HTML
             )
         except Exception as e:
-            logger.error(f"Status send error: {e}")
+            logger.error(f"Status error: {e}")
