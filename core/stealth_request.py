@@ -1,6 +1,5 @@
 """
 Anti-Ban Request Handler
-Random delays, rotation, human-like behavior
 """
 
 import random
@@ -16,10 +15,10 @@ class StealthRequest:
     """Prevents IP ban with intelligent request management"""
     
     USER_AGENTS = [
-        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-        'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36',
-        'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36',
-        'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:109.0) Gecko/20100101',
+        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:121.0) Gecko/20100101 Firefox/121.0',
     ]
     
     def __init__(self, config: Dict):
@@ -35,36 +34,32 @@ class StealthRequest:
         if not self.config.get('enable_jitter', True):
             return
             
-        # Calculate time since last request
         current_time = time.time()
         time_since_last = current_time - self.last_request_time
         
-        # Base delay + random jitter
         base_delay = random.uniform(self.min_delay, self.max_delay)
         
-        # Add exponential backoff if too many requests
         if self.request_count > self.max_per_minute:
             base_delay *= 2
+            logger.warning("Rate limit approaching, backing off...")
             
-        # Ensure minimum gap
         if time_since_last < base_delay:
             await asyncio.sleep(base_delay - time_since_last)
             
         self.last_request_time = time.time()
         self.request_count += 1
         
-        # Reset counter every minute
         if self.request_count >= self.max_per_minute:
             await asyncio.sleep(60)
             self.request_count = 0
     
     def _get_headers(self) -> Dict:
-        """Rotate headers to appear as different clients"""
+        """Rotate headers"""
         return {
             'User-Agent': random.choice(self.USER_AGENTS),
             'Accept': 'application/json',
             'Accept-Language': 'en-US,en;q=0.9',
-            'Accept-Encoding': 'gzip, deflate',
+            'Accept-Encoding': 'gzip, deflate, br',
             'Connection': 'keep-alive',
             'Cache-Control': 'no-cache',
             'X-Requested-With': 'XMLHttpRequest',
@@ -74,20 +69,25 @@ class StealthRequest:
         """Stealth GET request"""
         await self._apply_jitter()
         
-        headers = self._get_headers()
-        
         try:
             async with aiohttp.ClientSession() as session:
-                async with session.get(url, headers=headers, params=params, timeout=30) as response:
-                    if response.status == 429:  # Rate limited
-                        logger.warning("Rate limited, backing off...")
+                async with session.get(
+                    url, 
+                    headers=self._get_headers(), 
+                    params=params, 
+                    timeout=aiohttp.ClientTimeout(total=30)
+                ) as response:
+                    
+                    if response.status == 429:
+                        logger.warning("Rate limited, waiting 60s...")
                         await asyncio.sleep(60)
                         return await self.get(url, params)
+                    
                     response.raise_for_status()
                     return await response.json()
+                    
         except Exception as e:
             logger.error(f"Request failed: {e}")
-            await asyncio.sleep(5)
             return {}
     
     async def post(self, url: str, data: Dict) -> Dict:
@@ -99,9 +99,15 @@ class StealthRequest:
         
         try:
             async with aiohttp.ClientSession() as session:
-                async with session.post(url, headers=headers, json=data, timeout=30) as response:
+                async with session.post(
+                    url, 
+                    headers=headers, 
+                    json=data, 
+                    timeout=aiohttp.ClientTimeout(total=30)
+                ) as response:
                     response.raise_for_status()
                     return await response.json()
+                    
         except Exception as e:
-            logger.error(f"POST request failed: {e}")
+            logger.error(f"POST failed: {e}")
             return {}
