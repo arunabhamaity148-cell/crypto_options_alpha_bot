@@ -10,11 +10,15 @@ load_dotenv()
 # Railway
 PORT = int(os.getenv('PORT', 8080))
 
-# API Keys
+# API Keys - FIXED: Use TELEGRAM_TOKEN (consistent with main.py)
+TELEGRAM_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN', '')  # From env, but map to TELEGRAM_TOKEN
+TELEGRAM_CHAT_ID = os.getenv('TELEGRAM_CHAT_ID', '')
+
+# Alternative: Direct mapping
+# TELEGRAM_TOKEN = os.getenv('TELEGRAM_TOKEN', '')  # If you use this in Railway
+
 BINANCE_API_KEY = os.getenv('BINANCE_API_KEY', '')
 BINANCE_API_SECRET = os.getenv('BINANCE_API_SECRET', '')
-TELEGRAM_BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN', '')
-TELEGRAM_CHAT_ID = os.getenv('TELEGRAM_CHAT_ID', '')
 
 # Assets
 ASSETS_CONFIG = {
@@ -49,7 +53,7 @@ TRADING_CONFIG = {
     'max_signals_per_asset': 2,
     'default_risk_per_trade': 0.01,
     'account_size': 100000,
-    'correlation_threshold': 0.8
+    'correlation_threshold': 0.8,
 }
 
 # Stealth
