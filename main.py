@@ -1,6 +1,6 @@
 """
 Crypto Options Alpha Bot - Main Entry Point
-FULLY FIXED VERSION - Reliable Entry Price & Position Size
+FINAL FIXED VERSION - Real-time Price + Warmup + Validation
 """
 
 import os
@@ -49,7 +49,7 @@ def home():
     return {
         'status': 'running',
         'bot': 'Crypto Options Alpha Bot',
-        'version': '2.2-stable',
+        'version': '2.3-final',
         'timestamp': datetime.now(timezone.utc).isoformat(),
         'assets': list(ASSETS_CONFIG.keys())
     }
@@ -77,11 +77,13 @@ class AlphaBot:
         self.last_signal_time = None
         self.signals_sent_this_hour = 0
         self.hour_start = datetime.now(timezone.utc)
+        self.deploy_time = datetime.now(timezone.utc)  # Track deploy time
         
     async def run(self):
-        """Main bot loop - STABLE VERSION"""
+        """Main bot loop - FINAL FIXED VERSION"""
         self.running = True
-        logger.info("🚀 Bot v2.2-stable starting")
+        logger.info("🚀 Bot v2.3-final starting")
+        logger.info(f"Deploy time: {self.deploy_time.isoformat()}")
         
         # Start WebSocket
         ws_task = asyncio.create_task(ws_manager.start(ASSETS_CONFIG))
@@ -99,10 +101,10 @@ class AlphaBot:
         # Startup message
         try:
             await self.telegram.send_status(
-                "🟢 Bot v2.2 Stable Started\n"
+                "🟢 Bot v2.3 Final Started\n"
                 f"Assets: {', '.join(ASSETS_CONFIG.keys())}\n"
                 f"Threshold: {TRADING_CONFIG['min_score_threshold']}+\n"
-                "✅ Fixed: Entry price sync, Position size display"
+                "✅ Fixed: Real-time price, 5min warmup, slippage protection"
             )
         except Exception as e:
             logger.error(f"Startup message failed: {e}")
@@ -112,6 +114,14 @@ class AlphaBot:
             try:
                 self.cycle_count += 1
                 cycle_start = datetime.now(timezone.utc)
+                
+                # WARMUP CHECK: 5 minutes after deploy
+                elapsed = (cycle_start - self.deploy_time).total_seconds()
+                if elapsed < 300:  # 5 minutes
+                    remaining = 300 - elapsed
+                    logger.info(f"⏸️ WARMUP: {remaining:.0f}s remaining")
+                    await asyncio.sleep(min(60, remaining))
+                    continue
                 
                 # Reset hourly counter
                 if (cycle_start - self.hour_start).seconds >= 3600:
@@ -182,7 +192,6 @@ class AlphaBot:
         merged = rest_data.copy()
         for asset, ws_info in ws_data.items():
             if asset in merged:
-                # WebSocket has priority for real-time data
                 if 'trades' in ws_info:
                     merged[asset].recent_trades = ws_info['trades']
                 if 'last_price' in ws_info:
@@ -246,14 +255,14 @@ class AlphaBot:
                     {
                         'orderbook': data.orderbook, 
                         'funding_rate': data.funding_rate,
-                        'current_price': current_price  # Pass real-time price
+                        'current_price': current_price
                     }, 
                     recent_trades
                 )
                 
                 if lh_setup:
                     lh_setup['asset'] = asset
-                    lh_setup['current_price'] = current_price  # Store for entry calc
+                    lh_setup['current_price'] = current_price
                     signals.append(('liquidity_hunt', lh_setup))
                     logger.info(f"🎯 LH Signal: {asset} @ {lh_setup.get('confidence', 0)}")
                     
@@ -283,7 +292,7 @@ class AlphaBot:
             await self._score_and_send_signals(signals, market_data, time_quality)
     
     async def _score_and_send_signals(self, signals: List, market_data: Dict, time_quality: str):
-        """Score and send - ONLY 1 BEST SIGNAL with real-time entry"""
+        """Score and send with REAL-TIME PRICE VALIDATION"""
         from signals.scorer import AlphaScorer
         
         scorer = AlphaScorer(TRADING_CONFIG)
@@ -296,11 +305,39 @@ class AlphaBot:
             if not data:
                 continue
             
-            # Prepare market data
+            # GET REAL-TIME PRICE
+            current_price = await self.get_current_price(asset)
+            if current_price == 0:
+                logger.warning(f"No current price for {asset}")
+                continue
+            
+            # VALIDATE: Signal price vs Market price
+            signal_price = setup.get('entry_price', 0)
+            if signal_price == 0:
+                logger.warning(f"No signal price for {asset}")
+                continue
+            
+            slippage = abs(signal_price - current_price) / current_price
+            
+            if slippage > 0.003:  # 0.3% max slippage
+                logger.warning(f"🚫 {asset}: Slippage {slippage:.2%} too high")
+                logger.warning(f"   Signal: {signal_price:,.2f} | Market: {current_price:,.2f}")
+                continue  # Skip this signal
+            
+            # UPDATE to real market price
+            setup['entry_price'] = current_price
+            setup['stop_loss'] = current_price * 0.992 if setup['direction'] == 'long' else current_price * 1.008
+            setup['target_1'] = current_price * 1.018 if setup['direction'] == 'long' else current_price * 0.982
+            setup['target_2'] = current_price * 1.030 if setup['direction'] == 'long' else current_price * 0.970
+            
+            logger.info(f"✅ {asset}: Price validated | Slippage: {slippage:.3%}")
+            logger.info(f"   Updated entry: {current_price:,.2f}")
+            
+            # Prepare market data for scoring
             score_data = {
                 'orderbook': data.orderbook,
                 'funding_rate': data.funding_rate,
-                'spot_price': setup.get('current_price', data.spot_price),
+                'spot_price': current_price,
                 'perp_price': data.perp_price,
             }
             
@@ -318,6 +355,7 @@ class AlphaBot:
             logger.info(f"📊 {asset} | Score: {score['total_score']} | Rec: {score['recommendation']}")
         
         if not scored_signals:
+            logger.info("No valid signals after price validation")
             return
         
         # Sort by score
@@ -380,8 +418,8 @@ class AlphaBot:
             print("\n" + "="*60)
             print(f"🚨 SIGNAL: {signal.asset} {signal.direction.upper()}")
             print(f"Score: {total_score}/100 | Strategy: {strategy_name}")
-            print(f"Entry: {signal.entry_price} | Stop: {signal.stop_loss}")
-            print(f"Targets: {signal.target_1} / {signal.target_2}")
+            print(f"Entry: {signal.entry_price:,.2f} | Stop: {signal.stop_loss:,.2f}")
+            print(f"Targets: {signal.target_1:,.2f} / {signal.target_2:,.2f}")
             print(f"Position: {position_size} contracts")
             print("="*60 + "\n")
             
