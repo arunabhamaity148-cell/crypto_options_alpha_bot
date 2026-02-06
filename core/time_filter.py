@@ -5,7 +5,7 @@ Bot only runs during golden hours to save Railway resources
 
 import logging
 from typing import Dict, Tuple, Optional
-from datetime import datetime, time
+from datetime import datetime, time, timedelta
 import pytz
 
 logger = logging.getLogger(__name__)
@@ -21,15 +21,10 @@ class TimeFilter:
         self.golden_hours = [
             # US Market Open - Best liquidity
             (time(19, 0), time(21, 30)),   # 7:00 PM - 9:30 PM IST
-            
-            # Pre-US momentum (optional, comment out to save more)
-            # (time(17, 30), time(19, 0)),   # 5:30 PM - 7:00 PM IST
         ]
         
         # Days to trade (0=Monday, 4=Friday)
         self.trading_days = [0, 1, 2, 3]  # Mon-Thu only
-        # Friday off completely or reduce:
-        # self.trading_days = [0, 1, 2, 3, 4]  # Include Friday
         
     def should_bot_run(self) -> Tuple[bool, Optional[int], str]:
         """
@@ -44,7 +39,6 @@ class TimeFilter:
         if weekday not in self.trading_days:
             # Calculate sleep until next Monday 7 PM
             if weekday == 4:  # Friday
-                # Sleep until Monday 7 PM
                 sleep_seconds = self._seconds_until_monday_7pm(now)
                 return False, sleep_seconds, "Weekend - bot sleeping until Monday"
             elif weekday in [5, 6]:  # Saturday/Sunday
@@ -61,7 +55,6 @@ class TimeFilter:
                 sleep_seconds = self._seconds_until_time(now, next_window)
                 return False, sleep_seconds, f"Outside golden hours - sleeping until {next_window}"
             else:
-                # No more windows today, sleep until tomorrow 7 PM
                 sleep_seconds = self._seconds_until_tomorrow_7pm(now)
                 return False, sleep_seconds, "Golden hours over - sleeping until tomorrow"
         
@@ -91,7 +84,6 @@ class TimeFilter:
         """Calculate seconds until tomorrow 7 PM"""
         tomorrow = now + timedelta(days=1)
         target = tomorrow.replace(hour=19, minute=0, second=0, microsecond=0)
-        # Skip to Monday if tomorrow is weekend
         if target.weekday() >= 5:
             target += timedelta(days=(7 - target.weekday()))
         return int((target - now).total_seconds())
@@ -111,7 +103,6 @@ class TimeFilter:
         current_hour = now.hour
         current_minute = now.minute
         
-        # Only called during golden hours now
         if 19 <= current_hour < 21 or (current_hour == 21 and current_minute <= 30):
             return True, {
                 'session': 'US Market Open',
@@ -138,7 +129,7 @@ class TimeFilter:
                 'action': 'trade',
                 'sleep_seconds': 0,
                 'reason': 'Golden hour active',
-                'next_check': 60  # Check again in 1 min
+                'next_check': 60
             }
         
         sleep_hours = sleep_seconds / 3600
