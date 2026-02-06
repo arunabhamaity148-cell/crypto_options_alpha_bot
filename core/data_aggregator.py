@@ -1,13 +1,15 @@
 """
-Data Aggregator - Cached for Railway Hobby
-Reduce API calls, faster execution
+Data Aggregator with CoinDCX Options Integration
 """
 
 import asyncio
 import logging
-from typing import Dict
+from typing import Dict, Optional, List
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import datetime
+
+from core.stealth_request import StealthRequest
+from core.coindcx_client import coindcx_client
 
 logger = logging.getLogger(__name__)
 
@@ -20,23 +22,23 @@ class AssetData:
     open_interest: float
     volume_24h: float
     orderbook: Dict
-    timestamp: datetime
+    options_data: Optional[Dict] = None
+    recent_trades: List = None
+    timestamp: datetime = None
 
 class DataAggregator:
-    def __init__(self, stealth_request):
+    def __init__(self, stealth_request: StealthRequest):
         self.stealth = stealth_request
         self._cache = {}
         self._cache_time = {}
         
     def _get_cached(self, key: str, ttl: int = 60):
-        """Get cached data if valid"""
         if key in self._cache and key in self._cache_time:
             if datetime.now() - self._cache_time[key] < timedelta(seconds=ttl):
                 return self._cache[key]
         return None
     
     def _set_cached(self, key: str, value):
-        """Cache data with timestamp"""
         self._cache[key] = value
         self._cache_time[key] = datetime.now()
         
@@ -60,7 +62,7 @@ class DataAggregator:
     async def _fetch_asset_data(self, asset: str, config: Dict) -> AssetData:
         symbol = config['symbol']
         
-        # Parallel fetch with caching
+        # Parallel fetch
         spot, perp, funding, oi, volume, ob = await asyncio.gather(
             self.get_spot_price(symbol),
             self.get_perp_price(symbol),
@@ -79,6 +81,9 @@ class DataAggregator:
         volume = volume if not isinstance(volume, Exception) else 0
         ob = ob if not isinstance(ob, Exception) else {}
         
+        # Get options data from CoinDCX (NEW)
+        options_data = await self.get_options_data(asset, spot)
+        
         return AssetData(
             asset=asset,
             spot_price=spot,
@@ -87,13 +92,56 @@ class DataAggregator:
             open_interest=oi,
             volume_24h=volume,
             orderbook=ob,
+            options_data=options_data,
+            recent_trades=[],
             timestamp=datetime.now()
         )
     
+    async def get_options_data(self, asset: str, spot_price: float) -> Optional[Dict]:
+        """Fetch real options data from CoinDCX"""
+        
+        if coindcx_client is None:
+            logger.debug("CoinDCX client not initialized")
+            return None
+        
+        try:
+            # Find ATM strike
+            strike_step = 100 if asset == 'BTC' else 10
+            atm_strike = round(spot_price / strike_step) * strike_step
+            
+            # Get both call and put
+            call_task = coindcx_client.find_best_option(
+                asset, atm_strike, 'CE', expiry_days=2
+            )
+            put_task = coindcx_client.find_best_option(
+                asset, atm_strike, 'PE', expiry_days=2
+            )
+            
+            call_data, put_data = await asyncio.gather(call_task, put_task)
+            
+            # Calculate IV skew
+            iv_skew = 0
+            if call_data and put_data:
+                call_iv = call_data.get('iv', 0)
+                put_iv = put_data.get('iv', 0)
+                if call_iv > 0:
+                    iv_skew = (put_iv - call_iv) / call_iv
+            
+            return {
+                'atm_strike': atm_strike,
+                'call': call_data,
+                'put': put_data,
+                'iv_skew': iv_skew,
+                'timestamp': datetime.now().isoformat()
+            }
+            
+        except Exception as e:
+            logger.error(f"Options data error: {e}")
+            return None
+    
     async def get_spot_price(self, symbol: str) -> float:
-        """Public method - cached"""
         cache_key = f"spot_{symbol}"
-        cached = self._get_cached(cache_key, 2)  # 2s TTL
+        cached = self._get_cached(cache_key, 2)
         if cached:
             return cached
             
@@ -120,7 +168,6 @@ class DataAggregator:
         return price
     
     async def get_funding_rate(self, symbol: str) -> float:
-        """Cached for 5 minutes"""
         cache_key = f"funding_{symbol}"
         cached = self._get_cached(cache_key, 300)
         if cached:
@@ -130,12 +177,11 @@ class DataAggregator:
             'https://fapi.binance.com/fapi/v1/fundingRate',
             {'symbol': symbol, 'limit': 1}
         )
-        rate = float(data[0].get('fundingRate', 0)) if data and len(data) > 0 else 0
+        rate = float(data[0].get('fundingRate', 0)) if data else 0
         self._set_cached(cache_key, rate)
         return rate
     
     async def get_open_interest(self, symbol: str) -> float:
-        """Cached for 1 minute"""
         cache_key = f"oi_{symbol}"
         cached = self._get_cached(cache_key, 60)
         if cached:
@@ -182,14 +228,12 @@ class DataAggregator:
         best_ask = asks[0][0]
         mid_price = (best_bid + best_ask) / 2
         
-        # Calculate metrics
         bid_pressure = sum(b[1] * b[0] for b in bids[:10])
         ask_pressure = sum(a[1] * a[0] for a in asks[:10])
         total_pressure = bid_pressure + ask_pressure
         
-        # Walls detection
-        avg_bid = sum(b[1] for b in bids[:20]) / 20
-        avg_ask = sum(a[1] for a in asks[:20]) / 20
+        avg_bid = sum(b[1] for b in bids[:20]) / 20 if bids else 0
+        avg_ask = sum(a[1] for a in asks[:20]) / 20 if asks else 0
         
         bid_walls = [(b[0], b[1]) for b in bids[:20] if b[1] > avg_bid * 5]
         ask_walls = [(a[0], a[1]) for a in asks[:20] if a[1] > avg_ask * 5]
