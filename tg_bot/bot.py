@@ -1,12 +1,11 @@
 """
-Telegram Bot - Compatible with python-telegram-bot v20+
-No ParseMode import - use string literals instead
+Telegram Bot - Fixed datetime
 """
 
 import asyncio
 import logging
 from typing import Dict, Optional
-from datetime import datetime
+from datetime import datetime, timezone  # FIXED: Added timezone
 
 from telegram import Bot
 
@@ -48,6 +47,9 @@ class AlphaTelegramBot:
         quality = score.get('setup_quality', 'standard')
         quality_emoji = "🥇" if quality == 'institutional_grade' else "🥈" if quality == 'professional_grade' else "🥉"
         
+        # FIXED: Use timezone-aware datetime
+        current_time = datetime.now(timezone.utc).strftime('%H:%M')
+        
         message = (
             f"{dir_emoji} <b>{asset} ALPHA SIGNAL</b> {asset_emoji}\n\n"
             f"<b>Strategy:</b> <code>{setup.get('strategy', '').replace('_', ' ').title()}</code>\n"
@@ -83,7 +85,7 @@ class AlphaTelegramBot:
         message += (
             f"\n⏱ <b>Valid:</b> 60 minutes\n"
             f"⚠️ <b>Risk:</b> 1% max per trade\n"
-            f"<i>Alpha Bot v2.0 | {datetime.now().strftime('%H:%M')}</i>"
+            f"<i>Alpha Bot v2.0 | {current_time} UTC</i>"
         )
         
         return message
@@ -91,7 +93,8 @@ class AlphaTelegramBot:
     async def send_news_alert(self, title: str, message: str, impact: str = "medium", action: str = ""):
         """Send priority news alert"""
         try:
-            now = datetime.now()
+            # FIXED: Use timezone-aware datetime
+            now = datetime.now(timezone.utc)
             last_time = self.last_alert_time.get(title)
             
             if last_time and (now - last_time).seconds < 300:
@@ -114,7 +117,7 @@ class AlphaTelegramBot:
             if action:
                 formatted += f"<b>🎯 ACTION:</b> {action}\n"
             
-            formatted += f"\n<i>{now.strftime('%H:%M:%S')}</i>"
+            formatted += f"\n<i>{now.strftime('%H:%M:%S')} UTC</i>"
             
             await self.bot.send_message(
                 chat_id=self.chat_id,
@@ -147,6 +150,9 @@ class AlphaTelegramBot:
         emoji = "✅" if result == "win" else "❌" if result == "loss" else "⚪"
         pnl_emoji = "🟢" if pnl_percent > 0 else "🔴"
         
+        # FIXED: Use timezone-aware datetime
+        current_time = datetime.now(timezone.utc).strftime('%H:%M:%S')
+        
         msg = (
             f"{emoji} <b>TRADE CLOSED - {result.upper()}</b>\n\n"
             f"<b>Asset:</b> {asset}\n"
@@ -156,7 +162,7 @@ class AlphaTelegramBot:
         if duration:
             msg += f"<b>Duration:</b> {duration}\n"
         
-        msg += f"\n<i>{datetime.now().strftime('%H:%M:%S')}</i>"
+        msg += f"\n<i>{current_time} UTC</i>"
         
         try:
             await self.bot.send_message(
