@@ -1,6 +1,5 @@
 """
-Liquidity Hunt Strategy - FINAL FIXED VERSION
-Real-time entry price with validation
+Liquidity Hunt Strategy with Real Options Validation
 """
 
 from typing import Dict, Optional
@@ -19,14 +18,17 @@ class LiquidityHuntStrategy:
         
         orderbook = market_data.get('orderbook', {})
         current_price = market_data.get('current_price', 0)
+        options_data = market_data.get('options_data', {})
         
-        if not orderbook:
-            logger.warning(f"{self.asset}: No orderbook data")
+        if not orderbook or not current_price:
             return None
         
-        if current_price == 0:
-            logger.warning(f"{self.asset}: No current price provided")
-            return None
+        # Validate with real options data (NEW)
+        if options_data:
+            validation = self._validate_with_options(options_data, current_price)
+            if not validation['valid']:
+                logger.warning(f"Options validation failed: {validation['reason']}")
+                return None
         
         analyzer = MicrostructureAnalyzer()
         signal = analyzer.analyze(self.asset, orderbook, recent_trades)
@@ -34,38 +36,72 @@ class LiquidityHuntStrategy:
         if not signal or signal.strength < self.min_score:
             return None
         
-        return self._build_setup(signal, market_data, current_price)
+        setup = self._build_setup(signal, market_data, current_price)
+        
+        # Add real options info to setup
+        if options_data:
+            setup['options_validation'] = {
+                'iv': options_data.get('call', {}).get('iv', 0),
+                'premium': options_data.get('call', {}).get('mark_price', 0),
+                'delta': options_data.get('call', {}).get('delta', 0),
+                'oi': options_data.get('call', {}).get('oi', 0),
+            }
+        
+        return setup
+    
+    def _validate_with_options(self, options_data: Dict, spot_price: float) -> Dict:
+        """Validate signal with real options data"""
+        
+        call_data = options_data.get('call', {})
+        
+        if not call_data:
+            return {'valid': True, 'reason': 'No options data, using spot only'}
+        
+        iv = call_data.get('iv', 0)
+        premium = call_data.get('mark_price', 0)
+        delta = call_data.get('delta', 0.5)
+        
+        # Check IV not too high
+        if iv > 100:
+            return {'valid': False, 'reason': f'IV too high: {iv}'}
+        
+        # Check IV not too low (illiquid)
+        if iv < 20:
+            return {'valid': False, 'reason': f'IV too low: {iv}, illiquid'}
+        
+        # Check premium reasonable
+        if premium < 5:
+            return {'valid': False, 'reason': f'Premium too low: {premium}'}
+        
+        # Check delta reasonable (not too far OTM)
+        if abs(delta) < 0.3:
+            return {'valid': False, 'reason': f'Delta too low: {delta}, far OTM'}
+        
+        return {'valid': True, 'reason': 'Options validation passed'}
     
     def _build_setup(self, signal, data: Dict, current_price: float) -> Optional[Dict]:
-        """Build setup with REAL-TIME entry validation"""
+        """Build setup with validation"""
         
         direction = signal.direction
         
-        # Validate current_price
         if current_price <= 0:
-            logger.error(f"{self.asset}: Invalid current_price {current_price}")
             return None
         
         step = self.config.get('strike_step', 100)
-        
-        # CRITICAL: Use real-time current_price only
         entry = current_price
         
-        # Calculate strike based on direction
         if direction == 'long':
             strike = round((entry + step/2) / step) * step
             option_type = 'CE'
-            stop = entry * 0.992  # 0.8% stop
-            target1 = entry * 1.018  # 1.8% target
-            target2 = entry * 1.030  # 3% target
+            stop = entry * 0.992
+            target1 = entry * 1.018
+            target2 = entry * 1.030
         else:
             strike = round((entry - step/2) / step) * step
             option_type = 'PE'
-            stop = entry * 1.008  # 0.8% stop
-            target1 = entry * 0.982  # 1.8% target
-            target2 = entry * 0.970  # 3% target
-        
-        logger.info(f"{self.asset}: Setup built | Entry: {entry:,.2f} | Direction: {direction}")
+            stop = entry * 1.008
+            target1 = entry * 0.982
+            target2 = entry * 0.970
         
         return {
             'strategy': 'liquidity_hunt_reversal',
@@ -81,6 +117,5 @@ class LiquidityHuntStrategy:
                 'signal_type': signal.signal_type,
                 'ofi_ratio': signal.metadata.get('ofi_ratio', 0),
                 'cvd_delta': signal.metadata.get('cvd_delta', 0),
-                **signal.metadata
             }
         }
