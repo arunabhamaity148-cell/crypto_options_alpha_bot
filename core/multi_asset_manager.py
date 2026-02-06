@@ -1,5 +1,5 @@
 """
-Multi-Asset Manager - Fixed Position Sizing
+Multi-Asset Manager with Risk-Based Sizing
 """
 
 import logging
@@ -105,26 +105,34 @@ class MultiAssetManager:
         best = max(signals, key=lambda x: x.total_score)
         return [best]
     
-    def calculate_position_size(self, asset: str, entry: float, stop: float) -> float:
-        """Calculate position size for options"""
+    def calculate_position_size(self, asset: str, entry: float, stop: float,
+                               risk_level: str = 'normal') -> float:
+        """Calculate position size with risk adjustment"""
         account = self.config.get('account_size', 100000)
         risk_pct = self.config.get('default_risk_per_trade', 0.01)
-        risk_amount = account * risk_pct  # $1000 for $100k account
+        risk_amount = account * risk_pct
         
         if entry == 0 or stop == 0:
             return 0.1
         
-        # Calculate based on stop distance
+        # Base calculation
         stop_distance = abs(entry - stop) / entry
         notional = risk_amount / stop_distance
         
-        # Convert to contract size (simplified)
+        # Risk level multipliers
+        risk_multipliers = {
+            'normal': 1.0,
+            'high': 0.5,
+            'extreme': 0.25
+        }
+        mult = risk_multipliers.get(risk_level, 1.0)
+        
+        # Asset-specific sizing
         if 'BTC' in asset:
-            # ~$1000 risk, assume $100 per contract move
-            contracts = risk_amount / 100
+            contracts = (notional / entry) * mult
             return round(contracts, 3)
         elif 'ETH' in asset:
-            contracts = risk_amount / 10
+            contracts = (notional / entry) * mult * 10
             return round(contracts, 2)
-        else:
-            return round(risk_amount / entry, 2)
+        
+        return round((notional / entry) * mult, 2)
