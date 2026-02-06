@@ -3,7 +3,7 @@ Multi-Asset Manager with Risk-Based Sizing
 """
 
 import logging
-from typing import Dict, List
+from typing import Dict, List, Tuple
 from dataclasses import dataclass
 from datetime import datetime
 
@@ -56,7 +56,6 @@ class MultiAssetManager:
     
     def can_send_signal(self, asset: str, direction: str = None, 
                        entry_price: float = None) -> bool:
-        """Strict checks"""
         max_per_asset = self.config.get('max_signals_per_asset', 2)
         if self.daily_signals.get(asset, 0) >= max_per_asset:
             return False
@@ -107,7 +106,6 @@ class MultiAssetManager:
     
     def calculate_position_size(self, asset: str, entry: float, stop: float,
                                risk_level: str = 'normal') -> float:
-        """Calculate position size with risk adjustment"""
         account = self.config.get('account_size', 100000)
         risk_pct = self.config.get('default_risk_per_trade', 0.01)
         risk_amount = account * risk_pct
@@ -115,11 +113,9 @@ class MultiAssetManager:
         if entry == 0 or stop == 0:
             return 0.1
         
-        # Base calculation
         stop_distance = abs(entry - stop) / entry
         notional = risk_amount / stop_distance
         
-        # Risk level multipliers
         risk_multipliers = {
             'normal': 1.0,
             'high': 0.5,
@@ -127,7 +123,6 @@ class MultiAssetManager:
         }
         mult = risk_multipliers.get(risk_level, 1.0)
         
-        # Asset-specific sizing
         if 'BTC' in asset:
             contracts = (notional / entry) * mult
             return round(contracts, 3)
