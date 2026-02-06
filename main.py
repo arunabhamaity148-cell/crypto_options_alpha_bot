@@ -68,6 +68,12 @@ class AlphaBot:
         self.running = False
         self._components = None
         
+        # Initialize cycle counters here (FIX)
+        self.cycle_count = 0
+        self.last_signal_time = None
+        self.signals_sent_this_hour = 0
+        self.hour_start = datetime.now(timezone.utc)
+        
         # Initialize CoinDCX (NEW)
         if COINDCX_API_KEY and COINDCX_API_SECRET:
             init_coindcx_client(COINDCX_API_KEY, COINDCX_API_SECRET)
@@ -89,11 +95,6 @@ class AlphaBot:
             'market_context': MarketContext(),
             'performance': PerformanceTracker()
         }
-        
-        self.cycle_count = 0
-        self.last_signal_time = None
-        self.signals_sent_this_hour = 0
-        self.hour_start = datetime.now(timezone.utc)
         
         return self._components
         
