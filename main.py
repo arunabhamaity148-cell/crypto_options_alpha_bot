@@ -1,6 +1,6 @@
 """
 Crypto Options Alpha Bot - Main Entry Point
-Features: WebSocket, Trade Monitor, Structured Logging
+Fixed: datetime.utcnow() -> datetime.now(timezone.utc)
 """
 
 import os
@@ -9,7 +9,7 @@ import asyncio
 import logging
 import json
 import random
-from datetime import datetime, timedelta
+from datetime import datetime, timezone, timedelta  # FIXED: Added timezone
 from typing import Dict, List, Optional
 from dataclasses import dataclass, field
 from threading import Thread
@@ -38,8 +38,9 @@ from tg_bot.bot import AlphaTelegramBot
 class JSONFormatter(logging.Formatter):
     """JSON formatter for structured logging"""
     def format(self, record):
+        # FIXED: Use timezone-aware datetime
         log_obj = {
-            'timestamp': datetime.utcnow().isoformat(),
+            'timestamp': datetime.now(timezone.utc).isoformat(),
             'level': record.levelname,
             'logger': record.name,
             'message': record.getMessage(),
@@ -77,23 +78,24 @@ flask_app = Flask(__name__)
 
 @flask_app.route('/')
 def home():
+    # FIXED: Use timezone-aware datetime
     return {
         'status': 'running',
         'bot': 'Crypto Options Alpha Bot',
         'version': '2.0',
-        'timestamp': datetime.utcnow().isoformat(),
+        'timestamp': datetime.now(timezone.utc).isoformat(),
         'features': ['websocket', 'trade_monitor', 'structured_logging']
     }
 
 @flask_app.route('/health')
 def health():
     """Health check with detailed status"""
-    ws_status = 'connected' if ws_manager.running else 'disconnected'
+    ws_status = 'connected' if ws_manager.is_connected() else 'disconnected'
     active_trades = len(getattr(flask_app, 'trade_monitor', {}).active_trades or [])
     
     return {
         'status': 'healthy',
-        'timestamp': datetime.utcnow().isoformat(),
+        'timestamp': datetime.now(timezone.utc).isoformat(),
         'websocket': ws_status,
         'active_trades': active_trades,
         'cycle': getattr(flask_app, 'cycle_count', 0)
@@ -105,10 +107,10 @@ def api_status():
     return {
         'status': 'running',
         'version': '2.0',
-        'timestamp': datetime.utcnow().isoformat(),
+        'timestamp': datetime.now(timezone.utc).isoformat(),
         'assets': list(ASSETS_CONFIG.keys()),
-        'websocket_running': ws_manager.running,
-        'price_data_symbols': list(ws_manager.price_data.keys()),
+        'websocket_connected': ws_manager.is_connected(),
+        'websocket_symbols': list(ws_manager.price_data.keys()),
         'config': {
             'min_score': TRADING_CONFIG['min_score_threshold'],
             'max_signals_per_day': TRADING_CONFIG['max_signals_per_day']
@@ -167,7 +169,13 @@ class AlphaBot:
         logger.info("WebSocket task created")
         
         # Wait for WebSocket to connect
-        await asyncio.sleep(2)
+        await asyncio.sleep(3)
+        
+        # Check WebSocket status
+        if ws_manager.is_connected():
+            logger.info("✅ WebSocket connected successfully")
+        else:
+            logger.warning("⚠️ WebSocket not connected, will retry...")
         
         # Start Trade Monitor
         monitor_task = asyncio.create_task(
@@ -181,13 +189,14 @@ class AlphaBot:
         
         # Send startup message
         try:
+            ws_status = "✅ Connected" if ws_manager.is_connected() else "⚠️ Connecting..."
             await self.telegram.send_status(
                 "🟢 <b>Bot Started v2.0</b>\n\n"
                 f"<b>Features:</b> WebSocket, Trade Monitor, Structured Logging\n"
                 f"<b>Assets:</b> {', '.join(TRADING_CONFIG['assets'])}\n"
                 f"<b>Min Score:</b> {TRADING_CONFIG['min_score_threshold']}\n"
                 f"<b>Max Signals:</b> {TRADING_CONFIG['max_signals_per_day']}/day\n\n"
-                f"<i>WebSocket: Connected</i>\n"
+                f"<i>WebSocket: {ws_status}</i>\n"
                 f"<i>Monitor: Active</i>"
             )
         except Exception as e:
@@ -220,7 +229,7 @@ class AlphaBot:
                     await asyncio.sleep(300)
                     continue
                 
-                # Fetch market data (REST API backup)
+                # Fetch market data
                 logger.info("Fetching market data...")
                 market_data = await self.data_agg.get_all_assets_data(ASSETS_CONFIG)
                 
@@ -231,6 +240,7 @@ class AlphaBot:
                     'event': 'data_fetched',
                     'rest_assets': len(market_data),
                     'ws_symbols': len(ws_data),
+                    'ws_connected': ws_manager.is_connected(),
                     'cycle': self.cycle_count
                 })
                 
@@ -371,7 +381,7 @@ class AlphaBot:
                 greeks = GreeksEngine()
                 gs_strategy = GammaSqueezeStrategy(asset, config, greeks)
                 
-                options_chain = []  # Would come from API
+                options_chain = []
                 gs_setup = await gs_strategy.analyze(
                     {'orderbook': data.orderbook},
                     options_chain
@@ -450,7 +460,8 @@ class AlphaBot:
                     confidence=setup['confidence'],
                     score_breakdown=score['component_scores'],
                     rationale=setup['rationale'],
-                    timestamp=datetime.now()
+                    # FIXED: Use timezone-aware datetime
+                    timestamp=datetime.now(timezone.utc)
                 )
                 trading_signals.append(signal)
         
@@ -483,7 +494,8 @@ class AlphaBot:
                     tp1=signal.target_1,
                     tp2=signal.target_2,
                     strike=signal.strike_selection,
-                    expiry=datetime.now() + timedelta(hours=48),
+                    # FIXED: Use timezone-aware datetime
+                    expiry=datetime.now(timezone.utc) + timedelta(hours=48),
                     position_size=self.asset_manager.calculate_position_size(
                         signal.asset, signal.entry_price, signal.stop_loss
                     )
