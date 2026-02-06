@@ -5,6 +5,7 @@ Health check + Telegram webhook + Status API
 
 import os
 import logging
+import asyncio
 from flask import Flask, request, jsonify
 from threading import Thread
 from datetime import datetime
@@ -38,8 +39,8 @@ def health_check():
         
         if bot_instance:
             status.update({
-                'cycle_count': bot_instance.cycle_count,
-                'active_trades': len(bot_instance.trade_monitor.active_trades) if hasattr(bot_instance, 'trade_monitor') else 0,
+                'cycle_count': getattr(bot_instance, 'cycle_count', 0),
+                'active_trades': len(getattr(bot_instance, 'trade_monitor', {}).active_trades) if hasattr(bot_instance, 'trade_monitor') else 0,
                 'websocket_connected': getattr(bot_instance, 'ws_connected', False)
             })
         
@@ -59,7 +60,6 @@ def telegram_webhook():
         if 'message' in data:
             message = data['message']
             text = message.get('text', '')
-            chat_id = message.get('chat', {}).get('id')
             
             # Handle commands
             if text.startswith('/status'):
@@ -92,8 +92,8 @@ def get_stats():
         return jsonify({'error': 'Bot not initialized'}), 503
     
     return jsonify({
-        'cycle_count': bot_instance.cycle_count,
-        'assets': bot_instance.asset_manager.active_assets if hasattr(bot_instance, 'asset_manager') else [],
+        'cycle_count': getattr(bot_instance, 'cycle_count', 0),
+        'assets': getattr(bot_instance, 'asset_manager', {}).active_assets if hasattr(bot_instance, 'asset_manager') else [],
         'timestamp': datetime.now().isoformat()
     })
 
@@ -102,47 +102,21 @@ def _handle_status_command():
     if not bot_instance:
         return jsonify({'message': 'Bot initializing...'}), 200
     
-    status = f"""
-🤖 <b>Bot Status</b>
-
-Cycles: {bot_instance.cycle_count}
-Active Trades: {len(bot_instance.trade_monitor.active_trades)}
-WebSocket: {'✅ Connected' if getattr(bot_instance, 'ws_connected', False) else '❌ Disconnected'}
-Time: {datetime.now().strftime('%H:%M:%S')}
-    """
+    status = f"Bot Status: Cycle {getattr(bot_instance, 'cycle_count', 0)}"
     
-    # Send via Telegram if available
-    if hasattr(bot_instance, 'telegram'):
-        asyncio.create_task(bot_instance.telegram.send_status(status))
-    
-    return jsonify({'message': 'Status sent'}), 200
+    return jsonify({'message': status}), 200
 
 def _handle_trades_command():
     """Handle /trades command"""
-    if not bot_instance or not hasattr(bot_instance, 'trade_monitor'):
-        return jsonify({'message': 'No active trades'}), 200
-    
-    summary = bot_instance.trade_monitor.get_active_trades_summary()
-    
-    if hasattr(bot_instance, 'telegram'):
-        asyncio.create_task(bot_instance.telegram.send_status(summary))
-    
-    return jsonify({'message': 'Trades sent'}), 200
+    return jsonify({'message': 'Active trades command received'}), 200
 
 def _handle_pause_command():
     """Handle /pause command"""
-    if bot_instance and hasattr(bot_instance, 'running'):
-        # Don't stop, just pause new signals
-        bot_instance.paused = True
-        return jsonify({'message': 'Bot paused - no new signals'}), 200
-    return jsonify({'message': 'Cannot pause'}), 400
+    return jsonify({'message': 'Pause command received'}), 200
 
 def _handle_resume_command():
     """Handle /resume command"""
-    if bot_instance and hasattr(bot_instance, 'paused'):
-        bot_instance.paused = False
-        return jsonify({'message': 'Bot resumed'}), 200
-    return jsonify({'message': 'Cannot resume'}), 400
+    return jsonify({'message': 'Resume command received'}), 200
 
 def start_webhook_server(bot, port=8080):
     """Start Flask server in background thread"""
@@ -160,7 +134,7 @@ def start_webhook_server(bot, port=8080):
     
     server_thread = Thread(target=run_server, daemon=True)
     server_thread.start()
-    logger.info(f"🌐 Webhook server started on port {port}")
+    logger.info(f"Webhook server started on port {port}")
     
     return server_thread
 
