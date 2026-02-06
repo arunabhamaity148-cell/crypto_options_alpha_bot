@@ -1,104 +1,281 @@
 """
-Crypto Options Alpha Bot - Part 1: Core Classes
-BTC + ETH + SOL with News Guard, Time Filter, Trade Monitor
+Crypto Options Alpha Bot - Final Version
+WebSocket + Webhook + Flask Health Check
+Railway Optimized - Never Stops
 """
 
 import asyncio
 import logging
 import os
 from datetime import datetime, timedelta
-from dotenv import load_dotenv
-
-load_dotenv()
 
 from config.settings import (
-    BINANCE_API_KEY, BINANCE_API_SECRET,
-    COINDCX_API_KEY, COINDCX_API_SECRET,
-    TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID,
-    TRADING_CONFIG, STEALTH_CONFIG, ASSETS_CONFIG, ASSET_THRESHOLDS
+    TRADING_CONFIG, ASSETS_CONFIG, ASSET_THRESHOLDS,
+    TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, PORT
 )
 
-from core.stealth_request import StealthRequest
-from core.data_aggregator import DataAggregator, AssetData
+from core.websocket_manager import ws_manager
+from core.data_aggregator import DataAggregator
 from core.multi_asset_manager import MultiAssetManager, TradingSignal
 from core.time_filter import TimeFilter
-from core.news_guard import news_guard, NEWS_QUICK_REFERENCE
+from core.news_guard import news_guard
 from core.trade_monitor import TradeMonitor, ActiveTrade
-
-from indicators.greeks_engine import GreeksEngine
-from strategies.liquidity_hunt import LiquidityHuntStrategy
-from strategies.gamma_squeeze import GammaSqueezeStrategy
 from signals.scorer import AlphaScorer
 from telegram.bot import AlphaTelegramBot
+from webhook_server import start_webhook_server
 
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.FileHandler('bot.log'),
-        logging.StreamHandler()
-    ]
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
 
 
 class AlphaBot:
-    """Multi-Asset Alpha Bot with full protection"""
+    """Production-ready bot with WebSocket and Webhook"""
     
     def __init__(self):
-        logger.info("🚀 Initializing Alpha Bot")
-        logger.info(f"Assets: {TRADING_CONFIG['assets']}")
+        logger.info("🚀 Alpha Bot v2.0 - WebSocket Edition")
         
-        # Core components
-        self.stealth = StealthRequest(STEALTH_CONFIG)
-        self.data_agg = DataAggregator(self.stealth)
+        self.telegram = AlphaTelegramBot(TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID)
         self.asset_manager = MultiAssetManager(TRADING_CONFIG, ASSETS_CONFIG)
         self.time_filter = TimeFilter()
         self.news_guard = news_guard
-        self.greeks_engine = GreeksEngine()
         self.scorer = AlphaScorer(TRADING_CONFIG)
-        self.telegram = AlphaTelegramBot(TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID)
         self.trade_monitor = TradeMonitor(self.telegram)
-        
-        # Strategies
-        self.strategies = {}
-        for asset in TRADING_CONFIG['assets']:
-            thresholds = ASSET_THRESHOLDS.get(asset, ASSET_THRESHOLDS['BTC'])
-            config = {**ASSETS_CONFIG[asset], **thresholds}
-            self.strategies[asset] = {
-                'liquidity': LiquidityHuntStrategy(asset, config),
-                'gamma': GammaSqueezeStrategy(asset, config, self.greeks_engine)
-            }
+        self.data_agg = DataAggregator(None)  # WebSocket primary
         
         # State
         self.running = False
+        self.paused = False
         self.cycle_count = 0
+        self.ws_connected = False
         self._alerted_events = set()
+        
+        # WebSocket data cache
+        self.ws_data = {}
         
         logger.info("✅ Bot initialized")
     
-    # ========== BACKGROUND TASKS ==========
-    
-    async def _news_watcher(self):
-        """Continuous news monitoring"""
-        logger.info("📰 News watcher started")
+    async def run(self):
+        """Main loop with WebSocket"""
+        self.running = True
         
+        # Start Webhook server for Railway
+        start_webhook_server(self, PORT)
+        
+        # Start WebSocket manager
+        asyncio.create_task(self._websocket_loop())
+        
+        # Start background tasks
+        asyncio.create_task(self._news_watcher())
+        asyncio.create_task(self._trade_monitor_loop())
+        
+        # Startup message
+        await self.telegram.send_status(
+            "🟢 <b>Bot Started v2.0</b>\n\n"
+            f"WebSocket: Connecting...\n"
+            f"Health Check: http://0.0.0.0:{PORT}/health\n"
+            f"Assets: {', '.join(TRADING_CONFIG['assets'])}"
+        )
+        
+        # Main processing loop
         while self.running:
             try:
-                await asyncio.sleep(120)  # 2 min check
+                if self.paused:
+                    await asyncio.sleep(60)
+                    continue
                 
-                # Check breaking news
-                sentiment = await self.news_guard.get_news_sentiment()
+                self.cycle_count += 1
+                logger.info(f"\n{'='*50}")
+                logger.info(f"🔄 Cycle #{self.cycle_count}")
                 
-                if sentiment.get('breaking_news'):
-                    await self.telegram.send_news_alert(
-                        "🚨 BREAKING NEWS",
-                        sentiment.get('headline', 'Major news detected'),
-                        "high",
-                        "Review before trading"
-                    )
+                # Check news
+                allowed, news_reason = await self.news_guard.check_trading_allowed()
+                if not allowed:
+                    logger.warning(f"🛑 NEWS BLOCK: {news_reason}")
+                    await asyncio.sleep(180)
+                    continue
                 
-                # Check upcoming events
+                # Check time
+                is_good, time_info = self.time_filter.is_best_time()
+                time_quality = time_info.get('quality', 'unknown')
+                
+                if time_quality == 'avoid':
+                    sleep = self.time_filter.get_sleep_time()
+                    logger.info(f"⏰ Avoid time, sleep {sleep//60}m")
+                    await asyncio.sleep(sleep)
+                    continue
+                
+                # Get data from WebSocket cache
+                assets_data = self._get_ws_data()
+                
+                if not assets_data:
+                    logger.warning("⏳ Waiting for WebSocket data...")
+                    await asyncio.sleep(5)
+                    continue
+                
+                # Analyze
+                all_signals = []
+                for asset, data in assets_data.items():
+                    if not self.asset_manager.can_send_signal(asset):
+                        continue
+                    
+                    # Quick analysis on WebSocket data
+                    signal = await self._quick_analyze(asset, data)
+                    if signal:
+                        signal['time_quality'] = time_quality
+                        signal['news_status'] = news_reason
+                        all_signals.append(signal)
+                
+                # Process signals
+                if all_signals:
+                    await self._process_signals(all_signals)
+                
+                # Dynamic sleep
+                sleep = 30 if time_quality == 'excellent' else 60
+                logger.info(f"⏳ Sleep {sleep}s")
+                await asyncio.sleep(sleep)
+                
+            except Exception as e:
+                logger.error(f"❌ Error: {e}")
+                await asyncio.sleep(60)
+    
+    async def _websocket_loop(self):
+        """WebSocket connection loop"""
+        try:
+            # Register callbacks
+            for asset in ASSETS_CONFIG:
+                symbol = ASSETS_CONFIG[asset]['symbol'].lower()
+                ws_manager.register_callback(symbol, self._on_ws_update)
+            
+            # Start WebSocket
+            await ws_manager.start(ASSETS_CONFIG)
+            
+        except Exception as e:
+            logger.error(f"WebSocket loop error: {e}")
+            self.ws_connected = False
+    
+    def _on_ws_update(self, symbol: str, data_type: str, data: dict):
+        """Handle WebSocket updates"""
+        self.ws_connected = True
+        
+        if symbol not in self.ws_data:
+            self.ws_data[symbol] = {
+                'trades': [],
+                'orderbook': {},
+                'last_update': datetime.now()
+            }
+        
+        if data_type == 'trade':
+            self.ws_data[symbol]['trades'].append(data)
+            if len(self.ws_data[symbol]['trades']) > 100:
+                self.ws_data[symbol]['trades'] = self.ws_data[symbol]['trades'][-100:]
+        
+        elif data_type == 'orderbook':
+            self.ws_data[symbol]['orderbook'] = data
+    
+    def _get_ws_data(self) -> dict:
+        """Get current WebSocket data for all assets"""
+        result = {}
+        
+        for asset, config in ASSETS_CONFIG.items():
+            symbol = config['symbol'].lower()
+            
+            if symbol in self.ws_data:
+                data = self.ws_data[symbol]
+                
+                # Check freshness (max 10 seconds old)
+                age = (datetime.now() - data.get('last_update', datetime.now())).seconds
+                
+                if age < 10 and data.get('orderbook'):
+                    result[asset] = type('Data', (), {
+                        'spot_price': data['trades'][-1]['price'] if data['trades'] else 0,
+                        'orderbook': data['orderbook'],
+                        'trades': data['trades'][-20:],
+                        'timestamp': datetime.now()
+                    })()
+        
+        return result
+    
+    async def _quick_analyze(self, asset: str, data) -> dict:
+        """Quick analysis on WebSocket data"""
+        # Simplified - check for liquidity sweep
+        ob = data.orderbook
+        
+        if not ob or not data.trades:
+            return None
+        
+        # Get recent CVD
+        buy_vol = sum(t['qty'] for t in data.trades if not t.get('is_buyer_maker', False))
+        sell_vol = sum(t['qty'] for t in data.trades if t.get('is_buyer_maker', False))
+        
+        cvd = buy_vol - sell_vol
+        
+        # Check for sweep pattern
+        bids = ob.get('bids', [])
+        asks = ob.get('asks', [])
+        
+        if not bids or not asks:
+            return None
+        
+        current_price = (bids[0][0] + asks[0][0]) / 2
+        
+        # Simple sweep detection
+        if cvd > 0 and len(bids) > 5:
+            # Potential long setup
+            return {
+                'asset': asset,
+                'strategy': 'ws_liquidity_sweep',
+                'direction': 'long',
+                'entry_price': current_price,
+                'stop_loss': bids[5][0] if len(bids) > 5 else current_price * 0.99,
+                'target_1': current_price * 1.015,
+                'target_2': current_price * 1.03,
+                'confidence': 75,
+                'strike_selection': f"{round(current_price/100)*100} CE",
+                'expiry_suggestion': '24h',
+                'rationale': {'cvd': cvd, 'source': 'websocket'}
+            }
+        
+        return None
+    
+    async def _process_signals(self, signals: list):
+        """Process and send signals"""
+        for sig in signals:
+            # Score
+            score_data = self.scorer.calculate_score(
+                sig, {}, sig.get('news_status', 'safe'), sig.get('time_quality', 'moderate')
+            )
+            
+            if score_data['total_score'] < 85:
+                continue
+            
+            # Send
+            await self.telegram.send_signal(sig, score_data, {})
+            
+            # Add to monitor
+            trade = ActiveTrade(
+                asset=sig['asset'],
+                direction=sig['direction'],
+                entry_price=sig['entry_price'],
+                stop_loss=sig['stop_loss'],
+                tp1=sig['target_1'],
+                tp2=sig['target_2'],
+                strike=sig['strike_selection'],
+                expiry=datetime.now() + timedelta(hours=24),
+                position_size=0.01
+            )
+            self.trade_monitor.add_trade(trade)
+            
+            self.asset_manager.record_signal(sig['asset'])
+    
+    async def _news_watcher(self):
+        """News monitoring"""
+        while self.running:
+            try:
+                await asyncio.sleep(120)
+                
                 events = await self.news_guard.fetch_economic_calendar()
                 
                 for event in events:
@@ -115,7 +292,7 @@ class AlphaBot:
                                 f"Avoid ±2 hours of {event['event']}"
                             )
                 
-                # Check if trading should halt
+                # Check for immediate halt
                 is_safe, reason = await self.news_guard.check_trading_allowed()
                 
                 if not is_safe and "just" in reason.lower():
@@ -126,417 +303,48 @@ class AlphaBot:
                         "Bot will resume after event"
                     )
                     
-                    # Alert active trades
-                    active = self.trade_monitor.get_active_trades_summary()
-                    if "No active" not in active:
-                        await self.telegram.send_alert(
-                            "⚠️ ACTIVE TRADES AT RISK",
-                            f"News event!\n\n{active}\n\nConsider closing early.",
-                            "high"
-                        )
-                        
             except Exception as e:
                 logger.error(f"News watcher error: {e}")
     
     async def _trade_monitor_loop(self):
-        """Background trade monitoring"""
+        """Monitor active trades"""
         while self.running:
             try:
                 if self.trade_monitor.active_trades:
-                    await self.trade_monitor.monitor_cycle(self.data_agg)
+                    # Update prices from WebSocket
+                    for trade in self.trade_monitor.active_trades:
+                        symbol = ASSETS_CONFIG[trade.asset]['symbol'].lower()
+                        if symbol in self.ws_data and self.ws_data[symbol]['trades']:
+                            price = self.ws_data[symbol]['trades'][-1]['price']
+                            trade.update_price(price)
+                    
+                    # Check alerts
+                    await self.trade_monitor.check_alerts()
+                
                 await asyncio.sleep(5)
+                
             except Exception as e:
                 logger.error(f"Monitor error: {e}")
                 await asyncio.sleep(10)
     
-    # ========== MAIN OPERATIONS ==========
-    
-    async def _send_startup_message(self):
-        """Send startup info"""
-        upcoming = await self.news_guard.fetch_economic_calendar()
-        
-        events_text = ""
-        for event in upcoming[:5]:
-            events_text += f"• {event['event']}: {event['date']} ({event['days_until']}d)\n"
-        
-        message = (
-            "🟢 <b>ALPHA BOT STARTED</b>\n\n"
-            f"<b>Assets:</b> <code>{', '.join(TRADING_CONFIG['assets'])}</code>\n"
-            f"<b>Max Signals:</b> {TRADING_CONFIG['max_signals_per_day']}/day\n"
-            f"<b>Min Score:</b> {TRADING_CONFIG['min_score_threshold']}\n\n"
-            f"<b>📅 Upcoming Events:</b>\n{events_text}\n"
-            f"<b>🛡️ Protection:</b> News Guard | Time Filter | Trade Monitor"
-        )
-        
-        await self.telegram.send_status(message)
-    
-    async def _analyze_asset(self, asset: str, data: AssetData) -> list:
-        """Analyze single asset"""
-        signals = []
-        
-        try:
-            trades = await self.data_agg.get_recent_trades(
-                ASSETS_CONFIG[asset]['symbol'], 100
-            )
-            
-            market_dict = {
-                'orderbook': data.orderbook,
-                'spot_price': data.spot_price,
-                'perp_price': data.perp_price,
-                'funding_rate': data.funding_rate,
-                'open_interest': data.open_interest,
-                'volume_24h': data.volume_24h,
-                'timestamp': data.timestamp
-            }
-            
-            # Strategy 1: Liquidity Hunt
-            liq = await self.strategies[asset]['liquidity'].analyze(market_dict, trades)
-            if liq:
-                liq['asset'] = asset
-                liq['market_data'] = market_dict
-                signals.append(liq)
-            
-            # Strategy_CONFIG['min_score_threshold']}\n\n"
-            f"<b>📅 Upcoming Events:</b>\n{events_text}\n"
-            f"<b>🛡️ Protection:</b> News Guard | Time Filter | Trade Monitor"
-        )
-        
-        await self.telegram.send_status(message)
-    
-    async def _analyze_asset(self, asset: str, data: AssetData) -> list:
-        """Analyze single asset"""
-        signals = []
-        
-        try:
-            trades = await self.data_agg.get_recent_trades(
-                ASSETS_CONFIG[asset]['symbol'], 100
-            )
-            
-            market_dict = {
-                'orderbook': data.orderbook,
-                'spot_price': data.spot_price,
-                'perp_price': data.perp_price,
-                'funding_rate': data.funding_rate,
-                'open_interest': data.open_interest,
-                'volume_24h': data.volume_24h,
-                'timestamp': data.timestamp
-            }
-            
-            # Strategy 1: Liquidity Hunt
-            liq = await self.strategies[asset]['liquidity'].analyze(market_dict, trades)
-            if liq:
-                liq['asset'] = asset
-                liq['market_data'] = market_dict
-                signals.append(liq)
-            
-            # Strategy 2: Gamma Squeeze
-            chain = self._generate_chain(asset, data.spot_price)
-            gamma = await self.strategies[asset]['gamma'].analyze(market_dict, chain)
-            if gamma:
-                gamma['asset'] = asset
-                gamma['market_data'] = market_dict
-                signals.append(gamma)
-                
-        except Exception as e:
-            logger.error(f"❌ {asset} error: {e}")
-        
-        return signals
-    
-    def _generate_chain(self, asset: str, spot: float) -> list:
-        """Generate options chain"""
-        import random
-        random.seed(42)
-        
-        config = ASSETS_CONFIG[asset]
-        step = config['strike_step']
-        base = round(spot / step) * step
-        
-        chain = []
-        for i in range(-10, 11):
-            strike = base + (i * step)
-            oi_base = max(15 - abs(i), 3) * 100
-            
-            chain.append({
-                'strike': strike,
-                'call_oi': oi_base * (0.8 + random.random() * 0.4),
-                'put_oi': oi_base * (0.8 + random.random() * 0.4),
-                'call_iv': 0.45 + abs(i) * 0.015,
-                'put_iv': 0.45 + abs(i) * 0.015
-            })
-        
-        return chain
-    
-    async def _process_signals(self, signals: list, assets_data: dict):
-        """Process and send signals"""
-        trading_signals = []
-        
-        for sig in signals:
-            asset = sig['asset']
-            market_data = sig.pop('market_data', {})
-            time_quality = sig.pop('time_quality', 'moderate')
-            news_status = sig.pop('news_status', 'safe')
-            
-            # Score calculation
-            score_data = self.scorer.calculate_score(sig, market_data, news_status, time_quality)
-            
-            if score_data['total_score'] < TRADING_CONFIG['min_score_threshold']:
-                logger.info(f"❌ {asset} score {score_data['total_score']} low")
-                continue
-            
-            # Position size
-            pos_size = self.asset_manager.calculate_position_size(
-                asset, sig['entry_price'], sig['stop_loss']
-            )
-            
-            trading_signals.append(TradingSignal(
-                asset=asset,
-                strategy=sig['strategy'],
-                direction=sig['direction'],
-                entry_price=sig['entry_price'],
-                stop_loss=sig['stop_loss'],
-                target_1=sig['target_1'],
-                target_2=sig['target_2'],
-                strike_selection=sig['strike_selection'],
-                expiry_suggestion=sig['expiry_suggestion'],
-                confidence=score_data['total_score'],
-                score_breakdown=score_data,
-                rationale={
-                    **sig.get('rationale', {}),
-                    'score_components': score_data['component_scores'],
-                    'time_note': score_data.get('time_adjustment', ''),
-                    'news_note': score_data.get('news_adjustment', '')
-                },
-                timestamp=datetime.now()
-            ))
-        
-        if not trading_signals:
-            return
-        
-        # Filter and rank
-        filtered = self.asset_manager.filter_correlated_signals(trading_signals)
-        ranked = sorted(filtered, key=lambda x: x.confidence, reverse=True)
-        
-        # Send top signals
-        max_send = min(len(ranked), TRADING_CONFIG['max_signals_per_day'])
-        
-        for i, signal in enumerate(ranked[:max_send], 1):
-            await self._send_signal(signal, assets_data[signal.asset])
-            self.asset_manager.record_signal(signal.asset)
-            if i < max_send:
-                await asyncio.sleep(3)
-        
-        logger.info(f"📤 Sent {max_send} signals")
-    
-    async def _send_signal(self, signal: TradingSignal, market_data: AssetData):
-        """Send signal and add to monitor"""
-        
-        setup = {
-            'asset': signal.asset,
-            'strategy': signal.strategy,
-            'direction': signal.direction,
-            'entry_price': signal.entry_price,
-            'stop_loss': signal.stop_loss,
-            'target_1': signal.target_1,
-            'target_2': signal.target_2,
-            'strike_selection': signal.strike_selection,
-            'expiry_suggestion': signal.expiry_suggestion,
-            'rationale': signal.rationale,
-            'position_size': getattr(signal, 'position_size', 0),
-            'confidence': signal.confidence
-        }
-        
-        score_data = signal.score_breakdown
-        
-        # Send to Telegram
-        await self.telegram.send_signal(setup, score_data, {
-            'orderbook': market_data.orderbook,
-            'spot_price': market_data.spot_price,
-            'funding_rate': market_data.funding_rate
-        })
-        
-        # Add to monitor
-        expiry_hours = 48
-        if '24' in signal.expiry_suggestion:
-            expiry_hours = 24
-        elif '72' in signal.expiry_suggestion:
-            expiry_hours = 72
-        
-        trade = ActiveTrade(
-            asset=signal.asset,
-            direction=signal.direction,
-            entry_price=signal.entry_price,
-            stop_loss=signal.stop_loss,
-            tp1=signal.target_1,
-            tp2=signal.target_2,
-            strike=signal.strike_selection,
-            expiry=datetime.now() + timedelta(hours=expiry_hours),
-            position_size=getattr(signal, 'position_size', 0)
-        )
-        
-        self.trade_monitor.add_trade(trade)
-        logger.info(f"📨 {signal.asset} sent | Score: {signal.confidence:.1f}")
-    
-    def _calc_sleep(self, time_quality: str, signal_count: int) -> int:
-        """Calculate sleep time"""
-        if time_quality == 'excellent':
-            base = 45
-        elif time_quality == 'moderate':
-            base = 120
-        else:
-            base = 300
-        
-        if signal_count > 0:
-            base = max(30, base // 2)
-        
-        return base
-    
-    def _is_exceptional(self) -> bool:
-        """Check for override"""
-        return False
-    
     async def stop(self):
         """Shutdown"""
         self.running = False
+        ws_manager.stop()
         self.trade_monitor.stop_monitoring()
-        
-        await self.telegram.send_status(
-            "🔴 <b>Bot Stopped</b>\n\n"
-            f"Cycles: {self.cycle_count}\n"
-            f"{self.asset_manager.get_asset_status()}"
-        )
-        logger.info("Bot stopped")
-"""
-Crypto Options Alpha Bot - Part 2: Main Execution
-Run this file to start the bot
-"""
+        await self.telegram.send_status("🔴 Bot Stopped")
 
-import asyncio
-import logging
-from datetime import datetime
-
-# Import from part 1
-from main_core import AlphaBot, logger
-
-async def run_bot():
-    """Main execution loop"""
-    bot = AlphaBot()
-    bot.running = True
-    
-    # Send startup
-    await bot._send_startup_message()
-    
-    # Start background tasks
-    asyncio.create_task(bot._news_watcher())
-    asyncio.create_task(bot._trade_monitor_loop())
-    
-    # Main loop
-    while bot.running:
-        try:
-            bot.cycle_count += 1
-            current_time = datetime.now().strftime('%H:%M:%S')
-            
-            logger.info(f"\n{'='*60}")
-            logger.info(f"🔄 Cycle #{bot.cycle_count} | {current_time}")
-            logger.info(f"{'='*60}")
-            
-            # Step 1: News Guard
-            allowed, news_reason = await bot.news_guard.check_trading_allowed()
-            
-            if not allowed:
-                logger.warning(f"🛑 NEWS BLOCK: {news_reason}")
-                
-                if bot.cycle_count % 5 == 1 or "just" in news_reason.lower():
-                    await bot.telegram.send_news_alert(
-                        "🛑 TRADING HALTED",
-                        news_reason,
-                        "extreme",
-                        "Wait for all-clear"
-                    )
-                
-                await asyncio.sleep(180)
-                continue
-            
-            if "caution" in news_reason.lower():
-                logger.info(f"⚠️ NEWS: {news_reason}")
-            
-            # Step 2: Time Filter
-            is_good, time_info = bot.time_filter.is_best_time()
-            time_quality = time_info.get('quality', 'unknown')
-            
-            if time_quality == 'avoid' and not bot._is_exceptional():
-                logger.info(f"⏰ TIME FILTER: {time_info.get('reason', 'Avoid')}")
-                sleep = bot.time_filter.get_sleep_time()
-                logger.info(f"😴 Sleep {sleep//60} min")
-                await asyncio.sleep(sleep)
-                continue
-            
-            logger.info(f"⏰ TIME: {time_info.get('session', 'Regular')} ({time_quality})")
-            
-            # Step 3: Daily reset
-            if bot.asset_manager.should_reset_daily():
-                bot.asset_manager.reset_daily_counters()
-                await bot.telegram.send_status("🌅 Daily reset")
-            
-            # Step 4: Fetch data
-            logger.info("📊 Fetching data...")
-            assets_data = await bot.data_agg.get_all_assets_data(bot.asset_manager.assets_config)
-            
-            if not assets_data:
-                logger.error("❌ No data")
-                await asyncio.sleep(60)
-                continue
-            
-            logger.info(f"✅ Data: {', '.join(assets_data.keys())}")
-            
-            # Step 5: Analyze
-            all_signals = []
-            
-            for asset, data in assets_data.items():
-                if not bot.asset_manager.can_send_signal(asset):
-                    continue
-                
-                signals = await bot._analyze_asset(asset, data)
-                
-                for sig in signals:
-                    should_process, reason = bot.time_filter.should_process_signal(asset, sig)
-                    
-                    if should_process:
-                        sig['time_quality'] = time_quality
-                        sig['news_status'] = news_reason
-                        all_signals.append(sig)
-                        logger.info(f"✅ {asset} signal: {sig['strategy']}")
-                    else:
-                        logger.info(f"❌ {asset} rejected: {reason}")
-                
-                await asyncio.sleep(1)
-            
-            # Step 6: Process
-            if all_signals:
-                await bot._process_signals(all_signals, assets_data)
-            else:
-                logger.info("📭 No signals")
-            
-            # Sleep
-            sleep_time = bot._calc_sleep(time_quality, len(all_signals))
-            logger.info(f"⏳ Sleep {sleep_time}s")
-            await asyncio.sleep(sleep_time)
-            
-        except KeyboardInterrupt:
-            logger.info("🛑 Shutdown")
-            await bot.stop()
-            break
-            
-        except Exception as e:
-            logger.error(f"❌ Error: {e}", exc_info=True)
-            await asyncio.sleep(60)
 
 async def main():
     """Entry point"""
+    bot = AlphaBot()
+    
     try:
-        await run_bot()
+        await bot.run()
     except Exception as e:
-        logger.critical(f"Fatal: {e}", exc_info=True)
+        logging.critical(f"Fatal: {e}", exc_info=True)
         raise
+
 
 if __name__ == "__main__":
     asyncio.run(main())
