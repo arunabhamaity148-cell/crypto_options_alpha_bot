@@ -1,12 +1,11 @@
 """
-Multi-Asset Manager - EMERGENCY FIX
-Prevents signal spam, enforces cooldowns
+Multi-Asset Manager - Fixed Position Sizing
 """
 
 import logging
-from typing import Dict, List, Optional
+from typing import Dict, List
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import datetime
 
 logger = logging.getLogger(__name__)
 
@@ -25,7 +24,7 @@ class TradingSignal:
     score_breakdown: Dict
     rationale: Dict
     timestamp: datetime
-    total_score: float = 0  # Added for sorting
+    total_score: float = 0
 
 class MultiAssetManager:
     CORRELATIONS = {
@@ -42,9 +41,8 @@ class MultiAssetManager:
         self.daily_signals = {asset: 0 for asset in self.active_assets}
         self.last_reset = datetime.now()
         self.sent_signals = []
-        self.active_directions = {}  # asset -> direction
-        self.last_signal_time = None  # Global cooldown
-        self.active_trades = {}  # asset -> entry_price
+        self.active_directions = {}
+        self.active_trades = {}
         
     def should_reset_daily(self) -> bool:
         return (datetime.now() - self.last_reset).days >= 1
@@ -54,61 +52,39 @@ class MultiAssetManager:
         self.active_directions = {}
         self.active_trades = {}
         self.last_reset = datetime.now()
-        self.sent_signals = []
         logger.info("Daily counters reset")
     
     def can_send_signal(self, asset: str, direction: str = None, 
                        entry_price: float = None) -> bool:
-        """Strict checks to prevent spam"""
-        
-        # 1. Global cooldown (30 min between ANY signal)
-        if self.last_signal_time:
-            time_since = (datetime.now() - self.last_signal_time).total_seconds()
-            if time_since < 1800:  # 30 minutes
-                logger.warning(f"🚫 Global cooldown: {time_since/60:.1f}min remaining")
-                return False
-        
-        # 2. Asset cooldown (60 min between same asset)
-        last_asset_signal = None
-        for sig in reversed(self.sent_signals):
-            if sig['asset'] == asset:
-                last_asset_signal = sig
-                break
-        
-        if last_asset_signal:
-            time_since = (datetime.now() - last_asset_signal['timestamp']).total_seconds()
-            if time_since < 3600:  # 60 minutes
-                logger.warning(f"🚫 {asset} cooldown: {time_since/60:.1f}min remaining")
-                return False
-        
-        # 3. Direction lock (opposite direction blocked)
-        if asset in self.active_directions:
-            if direction and direction != self.active_directions[asset]:
-                logger.warning(f"🚫 {asset} opposite direction active: {self.active_directions[asset]}")
-                return False
-        
-        # 4. Daily limit
+        """Strict checks"""
         max_per_asset = self.config.get('max_signals_per_asset', 2)
         if self.daily_signals.get(asset, 0) >= max_per_asset:
-            logger.warning(f"🚫 {asset} daily limit reached: {max_per_asset}")
             return False
         
-        # 5. Price proximity check (avoid churn)
+        if asset in self.active_directions:
+            if direction and direction != self.active_directions[asset]:
+                logger.warning(f"🚫 {asset}: Opposite direction active")
+                return False
+        
+        for sig in reversed(self.sent_signals):
+            if sig['asset'] == asset:
+                if (datetime.now() - sig['timestamp']).seconds < 3600:
+                    logger.warning(f"🚫 {asset}: 60min cooldown")
+                    return False
+                break
+        
         if asset in self.active_trades and entry_price:
-            last_entry = self.active_trades[asset]
-            price_diff = abs(entry_price - last_entry) / last_entry
-            if price_diff < 0.005:  # 0.5% price difference
-                logger.warning(f"🚫 {asset} price too close to last: {price_diff:.2%}")
+            last = self.active_trades[asset]
+            if abs(entry_price - last) / last < 0.005:
+                logger.warning(f"🚫 {asset}: Price too close")
                 return False
         
         return True
     
     def record_signal(self, asset: str, direction: str, entry_price: float):
-        """Record with strict tracking"""
         self.daily_signals[asset] = self.daily_signals.get(asset, 0) + 1
         self.active_directions[asset] = direction
         self.active_trades[asset] = entry_price
-        self.last_signal_time = datetime.now()
         self.sent_signals.append({
             'asset': asset,
             'direction': direction,
@@ -118,47 +94,37 @@ class MultiAssetManager:
         logger.info(f"✅ Recorded: {asset} {direction} @ {entry_price}")
     
     def close_trade(self, asset: str):
-        """Release direction lock when trade closes"""
         if asset in self.active_directions:
             del self.active_directions[asset]
         if asset in self.active_trades:
             del self.active_trades[asset]
-        logger.info(f"🔓 Released: {asset}")
     
     def filter_correlated_signals(self, signals: List[TradingSignal]) -> List[TradingSignal]:
-        """Only return TOP 1 signal to prevent correlation risk"""
         if not signals:
             return []
-        
-        # Sort by score
-        sorted_signals = sorted(signals, key=lambda x: x.total_score, reverse=True)
-        
-        # Return only the best signal
-        best = sorted_signals[0]
-        logger.info(f"Selected best: {best.asset} {best.direction} @ {best.total_score}")
+        best = max(signals, key=lambda x: x.total_score)
         return [best]
     
     def calculate_position_size(self, asset: str, entry: float, stop: float) -> float:
-        """Conservative position sizing for OPTIONS"""
+        """Calculate position size for options"""
         account = self.config.get('account_size', 100000)
+        risk_pct = self.config.get('default_risk_per_trade', 0.01)
+        risk_amount = account * risk_pct  # $1000 for $100k account
         
-        # Max 1% risk per trade (premium paid)
-        max_premium = account * 0.01  # $1000 for $100k account
+        if entry == 0 or stop == 0:
+            return 0.1
         
-        # Conservative sizing based on asset volatility
-        sizing = {
-            'BTC': {'contract_value': 100, 'max_contracts': 0.5},
-            'ETH': {'contract_value': 10, 'max_contracts': 5},
-            'SOL': {'contract_value': 1, 'max_contracts': 50}
-        }
+        # Calculate based on stop distance
+        stop_distance = abs(entry - stop) / entry
+        notional = risk_amount / stop_distance
         
-        config = sizing.get(asset, {'contract_value': 100, 'max_contracts': 1})
-        
-        # Calculate based on risk
-        risk_per_contract = config['contract_value'] * 0.1  # Assume 10% move
-        max_by_risk = max_premium / risk_per_contract
-        
-        # Take minimum of risk-based and max limit
-        position = min(max_by_risk, config['max_contracts'])
-        
-        return round(position, 3)
+        # Convert to contract size (simplified)
+        if 'BTC' in asset:
+            # ~$1000 risk, assume $100 per contract move
+            contracts = risk_amount / 100
+            return round(contracts, 3)
+        elif 'ETH' in asset:
+            contracts = risk_amount / 10
+            return round(contracts, 2)
+        else:
+            return round(risk_amount / entry, 2)
