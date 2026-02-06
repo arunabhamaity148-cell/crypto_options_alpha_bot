@@ -23,7 +23,6 @@ class TimeFilter:
         current_minute = now.minute
         current_weekday = now.strftime('%A')
         
-        # Weekend check
         if current_weekday in ['Saturday', 'Sunday']:
             return False, {
                 'session': 'Weekend',
@@ -31,7 +30,6 @@ class TimeFilter:
                 'reason': 'Low liquidity'
             }
         
-        # US Market Open: 7:00 PM - 9:30 PM IST
         if 19 <= current_hour < 21 or (current_hour == 21 and current_minute <= 30):
             return True, {
                 'session': 'US Market Open',
@@ -39,7 +37,6 @@ class TimeFilter:
                 'priority': 1
             }
         
-        # US-Europe Overlap: 5:30 PM - 7:00 PM IST
         if 17 <= current_hour < 19:
             return True, {
                 'session': 'US-Europe Overlap',
@@ -47,7 +44,6 @@ class TimeFilter:
                 'priority': 2
             }
         
-        # Regular hours
         return True, {
             'session': 'Regular',
             'quality': 'moderate',
@@ -61,31 +57,24 @@ class TimeFilter:
         hour = now.hour
         minute = now.minute
         
-        # Friday after 9 PM IST (high weekend risk)
         if weekday == 'Friday' and hour >= 21:
             return True, "Friday late - weekend risk, low liquidity"
         
-        # Friday after 6 PM IST (reduced size)
         if weekday == 'Friday' and hour >= 18:
             return True, "Friday evening - reduce size or avoid"
         
-        # Weekend
         if weekday in ['Saturday', 'Sunday']:
             return True, "Weekend - markets closed or illiquid"
         
-        # Monday early (Asia open only)
         if weekday == 'Monday' and hour < 5:
             return True, "Monday early - wait for better liquidity"
         
-        # Thursday late (weekly expiry next day)
         if weekday == 'Thursday' and hour >= 22:
             return True, "Thursday late - weekly expiry approaching"
         
-        # Daily: Dead zone 9:30 AM - 12:30 PM IST
         if 9 <= hour < 12 or (hour == 12 and minute < 30):
             return True, "Dead zone - Europe not active yet"
         
-        # Check monthly expiry (last Friday of month)
         if self.is_monthly_expiry() and weekday == 'Friday':
             if hour >= 12:
                 return True, "Monthly expiry day - high gamma risk"
@@ -95,12 +84,10 @@ class TimeFilter:
     def is_monthly_expiry(self) -> bool:
         """Check if today is last Friday of month"""
         today = datetime.now(self.ist)
-        # Last day of month
         next_month = today.replace(day=28) + timedelta(days=4)
         last_day = next_month - timedelta(days=next_month.day)
-        # Last Friday
         last_friday = last_day
-        while last_friday.weekday() != 4:  # Friday = 4
+        while last_friday.weekday() != 4:
             last_friday -= timedelta(days=1)
         
         return today.date() == last_friday.date()
