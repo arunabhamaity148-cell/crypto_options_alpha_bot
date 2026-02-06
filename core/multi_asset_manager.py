@@ -1,10 +1,9 @@
 """
-Multi-Asset Manager for BTC, ETH, SOL
+Multi-Asset Manager
 """
 
-import asyncio
 import logging
-from typing import Dict, List, Optional
+from typing import Dict, List
 from dataclasses import dataclass
 from datetime import datetime
 
@@ -27,9 +26,6 @@ class TradingSignal:
     timestamp: datetime
 
 class MultiAssetManager:
-    """Manages BTC, ETH, SOL with correlation filtering"""
-    
-    # Crypto correlation matrix (BTC, ETH, SOL)
     CORRELATIONS = {
         ('BTC', 'ETH'): 0.85,
         ('BTC', 'SOL'): 0.80,
@@ -46,23 +42,19 @@ class MultiAssetManager:
         self.sent_signals = []
         
     def should_reset_daily(self) -> bool:
-        """Check if daily counters should reset"""
         return (datetime.now() - self.last_reset).days >= 1
     
     def reset_daily_counters(self):
-        """Reset daily signal counters"""
         self.daily_signals = {asset: 0 for asset in self.active_assets}
         self.last_reset = datetime.now()
         self.sent_signals = []
-        logger.info("🌅 Daily counters reset")
+        logger.info("Daily counters reset")
     
     def can_send_signal(self, asset: str) -> bool:
-        """Check if asset can send signal (daily limit)"""
         max_per_asset = self.config.get('max_signals_per_asset', 2)
         return self.daily_signals.get(asset, 0) < max_per_asset
     
     def record_signal(self, asset: str):
-        """Record sent signal"""
         self.daily_signals[asset] = self.daily_signals.get(asset, 0) + 1
         self.sent_signals.append({
             'asset': asset,
@@ -70,12 +62,9 @@ class MultiAssetManager:
         })
     
     def filter_correlated_signals(self, signals: List[TradingSignal]) -> List[TradingSignal]:
-        """Remove correlated signals to avoid doubling risk"""
-        
         if len(signals) <= 1:
             return signals
         
-        # Sort by confidence (highest first)
         sorted_signals = sorted(signals, key=lambda x: x.confidence, reverse=True)
         
         filtered = []
@@ -84,7 +73,6 @@ class MultiAssetManager:
         for signal in sorted_signals:
             asset = signal.asset
             
-            # Check correlation with already selected
             is_correlated = False
             for selected in selected_assets:
                 pair = tuple(sorted([asset, selected]))
@@ -102,12 +90,9 @@ class MultiAssetManager:
         return filtered
     
     def calculate_position_size(self, asset: str, entry: float, stop: float) -> float:
-        """Calculate position size based on risk"""
-        
         account = self.config.get('account_size', 100000)
         risk_pct = self.config.get('default_risk_per_trade', 0.01)
         
-        # Volatility adjustment
         regime = self.assets_config.get(asset, {}).get('volatility_regime', 'medium')
         multipliers = {'medium': 1.0, 'high': 0.8, 'very_high': 0.6}
         adj = multipliers.get(regime, 1.0)
@@ -120,16 +105,5 @@ class MultiAssetManager:
         risk_per_unit = abs(entry - stop) / entry
         position = risk_amount / (risk_per_unit * entry)
         
-        # Round to min quantity
         min_qty = self.assets_config.get(asset, {}).get('min_quantity', 0.001)
         return round(position / min_qty) * min_qty
-    
-    def get_asset_status(self) -> str:
-        """Get status of all assets"""
-        lines = ["📊 Asset Status:"]
-        for asset in self.active_assets:
-            used = self.daily_signals.get(asset, 0)
-            max_sig = self.config.get('max_signals_per_asset', 2)
-            status = "✅" if used < max_sig else "❌"
-            lines.append(f"{status} {asset}: {used}/{max_sig}")
-        return "\n".join(lines)
