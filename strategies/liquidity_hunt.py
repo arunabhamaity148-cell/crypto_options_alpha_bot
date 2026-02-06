@@ -1,5 +1,6 @@
 """
-Liquidity Hunt Strategy - Fixed with Real-Time Entry
+Liquidity Hunt Strategy - FINAL FIXED VERSION
+Real-time entry price with validation
 """
 
 from typing import Dict, Optional
@@ -19,7 +20,12 @@ class LiquidityHuntStrategy:
         orderbook = market_data.get('orderbook', {})
         current_price = market_data.get('current_price', 0)
         
-        if not orderbook or not current_price:
+        if not orderbook:
+            logger.warning(f"{self.asset}: No orderbook data")
+            return None
+        
+        if current_price == 0:
+            logger.warning(f"{self.asset}: No current price provided")
             return None
         
         analyzer = MicrostructureAnalyzer()
@@ -30,16 +36,22 @@ class LiquidityHuntStrategy:
         
         return self._build_setup(signal, market_data, current_price)
     
-    def _build_setup(self, signal, data: Dict, current_price: float) -> Dict:
-        """Build setup with REAL-TIME current price as entry"""
+    def _build_setup(self, signal, data: Dict, current_price: float) -> Optional[Dict]:
+        """Build setup with REAL-TIME entry validation"""
+        
         direction = signal.direction
+        
+        # Validate current_price
+        if current_price <= 0:
+            logger.error(f"{self.asset}: Invalid current_price {current_price}")
+            return None
         
         step = self.config.get('strike_step', 100)
         
-        # Use CURRENT real-time price for entry (not historical)
+        # CRITICAL: Use real-time current_price only
         entry = current_price
         
-        # Round strike to nearest step
+        # Calculate strike based on direction
         if direction == 'long':
             strike = round((entry + step/2) / step) * step
             option_type = 'CE'
@@ -52,6 +64,8 @@ class LiquidityHuntStrategy:
             stop = entry * 1.008  # 0.8% stop
             target1 = entry * 0.982  # 1.8% target
             target2 = entry * 0.970  # 3% target
+        
+        logger.info(f"{self.asset}: Setup built | Entry: {entry:,.2f} | Direction: {direction}")
         
         return {
             'strategy': 'liquidity_hunt_reversal',
