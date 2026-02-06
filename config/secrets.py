@@ -1,21 +1,20 @@
 """
-Secret Management
+API Secrets - CoinDCX Added
 """
 
-from cryptography.fernet import Fernet
 import os
+from dotenv import load_dotenv
 
-class SecretManager:
-    def __init__(self):
-        key = os.getenv('ENCRYPTION_KEY')
-        if not key:
-            key = Fernet.generate_key().decode()
-        self.cipher = Fernet(key.encode())
-    
-    def encrypt(self, data: str) -> str:
-        return self.cipher.encrypt(data.encode()).decode()
-    
-    def decrypt(self, token: str) -> str:
-        return self.cipher.decrypt(token.encode()).decode()
+load_dotenv()
 
-secret_manager = SecretManager()
+# Telegram
+TELEGRAM_BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN', '')
+TELEGRAM_CHAT_ID = os.getenv('TELEGRAM_CHAT_ID', '')
+
+# Binance
+BINANCE_API_KEY = os.getenv('BINANCE_API_KEY', '')
+BINANCE_API_SECRET = os.getenv('BINANCE_API_SECRET', '')
+
+# CoinDCX (NEW)
+COINDCX_API_KEY = os.getenv('COINDCX_API_KEY', '')
+COINDCX_API_SECRET = os.getenv('COINDCX_API_SECRET', '')
