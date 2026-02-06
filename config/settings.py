@@ -10,12 +10,9 @@ load_dotenv()
 # Railway
 PORT = int(os.getenv('PORT', 8080))
 
-# API Keys - FIXED: Use TELEGRAM_TOKEN (consistent with main.py)
-TELEGRAM_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN', '')  # From env, but map to TELEGRAM_TOKEN
+# API Keys
+TELEGRAM_BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN', '')
 TELEGRAM_CHAT_ID = os.getenv('TELEGRAM_CHAT_ID', '')
-
-# Alternative: Direct mapping
-# TELEGRAM_TOKEN = os.getenv('TELEGRAM_TOKEN', '')  # If you use this in Railway
 
 BINANCE_API_KEY = os.getenv('BINANCE_API_KEY', '')
 BINANCE_API_SECRET = os.getenv('BINANCE_API_SECRET', '')
