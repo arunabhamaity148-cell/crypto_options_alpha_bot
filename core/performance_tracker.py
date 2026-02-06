@@ -3,7 +3,7 @@ Performance Tracker with Circuit Breaker
 """
 
 import logging
-from typing import Dict, List
+from typing import Dict, List, Tuple  # ADDED Tuple here
 from datetime import datetime, timedelta
 from collections import deque
 
