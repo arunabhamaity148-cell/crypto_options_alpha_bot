@@ -3,7 +3,7 @@ Performance Tracker with Circuit Breaker
 """
 
 import logging
-from typing import Dict, List, Tuple  # ADDED Tuple here
+from typing import Dict, List, Tuple
 from datetime import datetime, timedelta
 from collections import deque
 
@@ -59,7 +59,7 @@ class PerformanceTracker:
             return {
                 'action': 'daily_limit',
                 'message': f'{self.max_daily_losses} losses today',
-                'cooldown_minutes': 240  # 4 hours
+                'cooldown_minutes': 240
             }
         
         return {'action': 'continue'}
