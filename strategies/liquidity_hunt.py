@@ -1,44 +1,36 @@
 """
-Liquidity Hunt Strategy - Highest Win Rate
+Liquidity Hunt Strategy - 75%+ Win Rate
 """
 
 from typing import Dict, Optional
 import logging
-from indicators.microstructure import MicrostructureAnalyzer, MicroSignal
 
 logger = logging.getLogger(__name__)
 
 class LiquidityHuntStrategy:
-    """75%+ win rate strategy"""
-    
     def __init__(self, asset: str, config: Dict):
         self.asset = asset
         self.config = config
-        self.analyzer = MicrostructureAnalyzer()
         self.min_score = config.get('min_score_threshold', 85)
     
     async def analyze(self, market_data: Dict, recent_trades: list) -> Optional[Dict]:
-        """Main analysis"""
+        from indicators.microstructure import MicrostructureAnalyzer
         
         orderbook = market_data.get('orderbook', {})
         if not orderbook:
             return None
         
-        # Get microstructure signal
-        signal = self.analyzer.analyze(self.asset, orderbook, recent_trades)
+        analyzer = MicrostructureAnalyzer()
+        signal = analyzer.analyze(self.asset, orderbook, recent_trades)
         
         if not signal or signal.strength < self.min_score:
             return None
         
-        # Build trade setup
         return self._build_setup(signal, market_data)
     
-    def _build_setup(self, signal: MicroSignal, data: Dict) -> Dict:
-        """Build complete setup"""
-        
+    def _build_setup(self, signal, data: Dict) -> Dict:
         mid = data.get('orderbook', {}).get('mid_price', 0)
         
-        # Round strike to asset step
         step = self.config.get('strike_step', 100)
         strike = round(mid / step) * step
         
