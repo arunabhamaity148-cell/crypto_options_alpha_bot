@@ -4,8 +4,7 @@ Prevents trading in bad market conditions
 """
 
 import logging
-from typing import Dict, List
-from datetime import datetime
+from typing import Dict, List, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -72,8 +71,6 @@ class MarketContext:
     
     def _check_options_bleeding(self, data: Dict) -> bool:
         """Check if both calls and puts are down big"""
-        # This would need options chain data
-        # Simplified check using available data
         calls_change = data.get('calls_avg_change', -10)
         puts_change = data.get('puts_avg_change', -10)
         
@@ -93,16 +90,16 @@ class MarketContext:
         """Check funding rate extremes"""
         funding = abs(data.get('funding_rate', 0))
         
-        if funding > 0.001:  # 0.1%
+        if funding > 0.001:
             return 'extreme'
-        elif funding > 0.0005:  # 0.05%
+        elif funding > 0.0005:
             return 'high'
         return 'normal'
     
     def _check_low_liquidity(self, data: Dict) -> bool:
         """Check for low liquidity conditions"""
         spread_pct = data.get('spread_pct', 0)
-        return spread_pct > 0.1  # 10% spread = illiquid
+        return spread_pct > 0.1
     
     def _check_volatility_spike(self, data: Dict) -> bool:
         """Check for recent volatility spike"""
@@ -110,7 +107,6 @@ class MarketContext:
         if len(recent_trades) < 10:
             return False
         
-        # Calculate recent volatility
         prices = [t.get('price', 0) for t in recent_trades[-10:]]
         if len(prices) < 2:
             return False
@@ -118,4 +114,4 @@ class MarketContext:
         returns = [abs(prices[i] - prices[i-1]) / prices[i-1] for i in range(1, len(prices))]
         avg_volatility = sum(returns) / len(returns)
         
-        return avg_volatility > 0.002  # 0.2% average move = volatile
+        return avg_volatility > 0.002
