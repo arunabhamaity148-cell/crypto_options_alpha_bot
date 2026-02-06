@@ -1,6 +1,6 @@
 """
 Crypto Options Alpha Bot - Main Entry Point
-EMERGENCY FIXED VERSION - Prevents Signal Spam
+FULLY FIXED VERSION - Reliable Entry Price & Position Size
 """
 
 import os
@@ -10,7 +10,7 @@ import logging
 import json
 import random
 from datetime import datetime, timezone, timedelta
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 from dataclasses import dataclass, field
 from threading import Thread
 
@@ -49,7 +49,7 @@ def home():
     return {
         'status': 'running',
         'bot': 'Crypto Options Alpha Bot',
-        'version': '2.1-emergency-fix',
+        'version': '2.2-stable',
         'timestamp': datetime.now(timezone.utc).isoformat(),
         'assets': list(ASSETS_CONFIG.keys())
     }
@@ -79,13 +79,13 @@ class AlphaBot:
         self.hour_start = datetime.now(timezone.utc)
         
     async def run(self):
-        """Main bot loop - EMERGENCY FIXED"""
+        """Main bot loop - STABLE VERSION"""
         self.running = True
-        logger.info("🚀 Bot v2.1-emergency-fix starting")
+        logger.info("🚀 Bot v2.2-stable starting")
         
         # Start WebSocket
         ws_task = asyncio.create_task(ws_manager.start(ASSETS_CONFIG))
-        await asyncio.sleep(2)
+        await asyncio.sleep(3)
         
         # Start Trade Monitor
         monitor_task = asyncio.create_task(
@@ -99,10 +99,10 @@ class AlphaBot:
         # Startup message
         try:
             await self.telegram.send_status(
-                "🟢 Bot v2.1 Emergency Fix Started\n"
+                "🟢 Bot v2.2 Stable Started\n"
                 f"Assets: {', '.join(ASSETS_CONFIG.keys())}\n"
                 f"Threshold: {TRADING_CONFIG['min_score_threshold']}+\n"
-                "⚠️ STRICT MODE: Max 1 signal per 30min"
+                "✅ Fixed: Entry price sync, Position size display"
             )
         except Exception as e:
             logger.error(f"Startup message failed: {e}")
@@ -130,15 +130,19 @@ class AlphaBot:
                     continue
                 
                 # Get time quality
-                time_ok, time_info = self.time_filter.is_best_time()
-                time_quality = time_info.get('quality', 'moderate')
+                try:
+                    time_ok, time_info = self.time_filter.is_best_time()
+                    time_quality = time_info.get('quality', 'moderate')
+                except Exception as e:
+                    logger.error(f"Time filter error: {e}")
+                    time_quality = 'moderate'
                 
-                # STRICT: Check global cooldown
+                # STRICT: Check global cooldown (30 min)
                 if self.last_signal_time:
                     cooldown_remaining = 1800 - (cycle_start - self.last_signal_time).total_seconds()
                     if cooldown_remaining > 0:
                         logger.info(f"⏸️ Global cooldown: {cooldown_remaining/60:.1f}min left")
-                        await asyncio.sleep(60)
+                        await asyncio.sleep(min(60, cooldown_remaining))
                         continue
                 
                 # Fetch data
@@ -146,7 +150,7 @@ class AlphaBot:
                 market_data = await self.data_agg.get_all_assets_data(ASSETS_CONFIG)
                 ws_data = self._get_websocket_data()
                 
-                # Merge
+                # Merge with priority to WebSocket for real-time
                 merged_data = self._merge_data(market_data, ws_data)
                 
                 if merged_data:
@@ -156,7 +160,7 @@ class AlphaBot:
                 cycle_duration = (datetime.now(timezone.utc) - cycle_start).total_seconds()
                 sleep_time = 60 if time_quality in ['excellent', 'good'] else 120
                 
-                logger.info(f"Cycle complete | Sleep: {sleep_time}s")
+                logger.info(f"Cycle complete | Duration: {cycle_duration:.1f}s | Sleep: {sleep_time}s")
                 await asyncio.sleep(sleep_time)
                 
             except Exception as e:
@@ -174,24 +178,29 @@ class AlphaBot:
         return ws_data
     
     def _merge_data(self, rest_data: Dict, ws_data: Dict) -> Dict:
+        """Merge with WebSocket priority for real-time prices"""
         merged = rest_data.copy()
         for asset, ws_info in ws_data.items():
             if asset in merged:
+                # WebSocket has priority for real-time data
                 if 'trades' in ws_info:
                     merged[asset].recent_trades = ws_info['trades']
                 if 'last_price' in ws_info:
                     merged[asset].spot_price = ws_info['last_price']
                 if 'orderbook' in ws_info:
-                    if 'ofi_ratio' in ws_info['orderbook']:
-                        merged[asset].orderbook['ofi_ratio'] = ws_info['orderbook']['ofi_ratio']
-                    if 'bid_walls' in ws_info['orderbook']:
-                        merged[asset].orderbook['bid_walls'] = ws_info['orderbook']['bid_walls']
-                    if 'ask_walls' in ws_info['orderbook']:
-                        merged[asset].orderbook['ask_walls'] = ws_info['orderbook']['ask_walls']
+                    ws_ob = ws_info['orderbook']
+                    if 'ofi_ratio' in ws_ob:
+                        merged[asset].orderbook['ofi_ratio'] = ws_ob['ofi_ratio']
+                    if 'bid_walls' in ws_ob:
+                        merged[asset].orderbook['bid_walls'] = ws_ob['bid_walls']
+                    if 'ask_walls' in ws_ob:
+                        merged[asset].orderbook['ask_walls'] = ws_ob['ask_walls']
+                    if 'mid_price' in ws_ob:
+                        merged[asset].orderbook['mid_price'] = ws_ob['mid_price']
         return merged
     
     async def get_current_price(self, asset: str) -> float:
-        """Public method for trade monitor"""
+        """Get current price - WebSocket priority"""
         symbol = ASSETS_CONFIG[asset]['symbol']
         ws_data = ws_manager.get_price_data(symbol)
         if ws_data and 'last_price' in ws_data:
@@ -202,7 +211,7 @@ class AlphaBot:
             return 0
     
     async def _process_market_data(self, market_data: Dict, time_quality: str):
-        """Process market data - EMERGENCY RESTRICTED"""
+        """Process with strict limits"""
         from strategies.liquidity_hunt import LiquidityHuntStrategy
         from strategies.gamma_squeeze import GammaSqueezeStrategy
         from indicators.greeks_engine import GreeksEngine
@@ -216,7 +225,7 @@ class AlphaBot:
         signals = []
         
         for asset, data in market_data.items():
-            # Check if can send (strict)
+            # Check if can send
             if not self.asset_manager.can_send_signal(asset):
                 continue
             
@@ -224,16 +233,27 @@ class AlphaBot:
             symbol = config['symbol']
             recent_trades = ws_manager.get_recent_trades(symbol, 30)
             
+            # Get REAL-TIME current price for entry
+            current_price = await self.get_current_price(asset)
+            if current_price == 0:
+                logger.warning(f"No price for {asset}, skipping")
+                continue
+            
             # Strategy 1: Liquidity Hunt
             try:
                 lh_strategy = LiquidityHuntStrategy(asset, config)
                 lh_setup = await lh_strategy.analyze(
-                    {'orderbook': data.orderbook, 'funding_rate': data.funding_rate}, 
+                    {
+                        'orderbook': data.orderbook, 
+                        'funding_rate': data.funding_rate,
+                        'current_price': current_price  # Pass real-time price
+                    }, 
                     recent_trades
                 )
                 
                 if lh_setup:
                     lh_setup['asset'] = asset
+                    lh_setup['current_price'] = current_price  # Store for entry calc
                     signals.append(('liquidity_hunt', lh_setup))
                     logger.info(f"🎯 LH Signal: {asset} @ {lh_setup.get('confidence', 0)}")
                     
@@ -252,6 +272,7 @@ class AlphaBot:
                     
                     if gs_setup:
                         gs_setup['asset'] = asset
+                        gs_setup['current_price'] = current_price
                         signals.append(('gamma_squeeze', gs_setup))
                         logger.info(f"🎯 GS Signal: {asset} @ {gs_setup.get('confidence', 0)}")
                         
@@ -262,7 +283,7 @@ class AlphaBot:
             await self._score_and_send_signals(signals, market_data, time_quality)
     
     async def _score_and_send_signals(self, signals: List, market_data: Dict, time_quality: str):
-        """Score and send - ONLY 1 BEST SIGNAL"""
+        """Score and send - ONLY 1 BEST SIGNAL with real-time entry"""
         from signals.scorer import AlphaScorer
         
         scorer = AlphaScorer(TRADING_CONFIG)
@@ -279,7 +300,7 @@ class AlphaBot:
             score_data = {
                 'orderbook': data.orderbook,
                 'funding_rate': data.funding_rate,
-                'spot_price': data.spot_price,
+                'spot_price': setup.get('current_price', data.spot_price),
                 'perp_price': data.perp_price,
             }
             
@@ -299,10 +320,10 @@ class AlphaBot:
         if not scored_signals:
             return
         
-        # Sort by score descending
+        # Sort by score
         scored_signals.sort(key=lambda x: x[2]['total_score'], reverse=True)
         
-        # TAKE ONLY TOP 1 SIGNAL
+        # Take ONLY TOP 1
         best = scored_signals[0]
         strategy_name, setup, score = best
         
@@ -314,7 +335,7 @@ class AlphaBot:
             logger.info(f"Best signal {total_score} below threshold {threshold}")
             return
         
-        # STRICT: Exceptional (90+) or nothing in moderate time
+        # STRICT: Exceptional (90+) or good time with 85+
         if time_quality not in ['excellent', 'good'] and total_score < 90:
             logger.info(f"Moderate time, score {total_score} < 90, skipping")
             return
@@ -327,6 +348,14 @@ class AlphaBot:
         ):
             logger.info(f"Cannot send {setup['asset']} - cooldown or opposite active")
             return
+        
+        # Calculate position size
+        position_size = self.asset_manager.calculate_position_size(
+            setup['asset'], 
+            setup['entry_price'], 
+            setup['stop_loss']
+        )
+        setup['position_size'] = position_size
         
         # Build signal
         signal = TradingSignal(
@@ -353,18 +382,16 @@ class AlphaBot:
             print(f"Score: {total_score}/100 | Strategy: {strategy_name}")
             print(f"Entry: {signal.entry_price} | Stop: {signal.stop_loss}")
             print(f"Targets: {signal.target_1} / {signal.target_2}")
+            print(f"Position: {position_size} contracts")
             print("="*60 + "\n")
             
-            # Send to Telegram
+            # Send to Telegram with position size
             await self.telegram.send_signal(setup, score, {
-                'orderbook': market_data[signal.asset].orderbook
+                'orderbook': market_data[signal.asset].orderbook,
+                'position_size': position_size
             })
             
             # Add to trade monitor
-            position_size = self.asset_manager.calculate_position_size(
-                signal.asset, signal.entry_price, signal.stop_loss
-            )
-            
             trade = ActiveTrade(
                 asset=signal.asset,
                 direction=signal.direction,
@@ -389,7 +416,7 @@ class AlphaBot:
             self.last_signal_time = datetime.now(timezone.utc)
             self.signals_sent_this_hour += 1
             
-            logger.info(f"✅ SENT: {signal.asset} {signal.direction} @ {total_score}")
+            logger.info(f"✅ SENT: {signal.asset} {signal.direction} @ {total_score} | Size: {position_size}")
             
             await asyncio.sleep(2)
             
