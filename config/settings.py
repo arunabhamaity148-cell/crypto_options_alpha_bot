@@ -45,7 +45,7 @@ ASSETS_CONFIG = {
 # Trading
 TRADING_CONFIG = {
     'assets': ['BTC', 'ETH', 'SOL'],
-    'min_score_threshold': 85,
+    'min_score_threshold': 55,
     'max_signals_per_day': 6,
     'max_signals_per_asset': 2,
     'default_risk_per_trade': 0.01,
