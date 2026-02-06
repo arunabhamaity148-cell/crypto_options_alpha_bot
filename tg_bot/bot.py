@@ -1,11 +1,11 @@
 """
-Telegram Bot - Fixed datetime
+Telegram Bot - Fixed with Position Size Display
 """
 
 import asyncio
 import logging
 from typing import Dict, Optional
-from datetime import datetime, timezone  # FIXED: Added timezone
+from datetime import datetime, timezone
 
 from telegram import Bot
 
@@ -18,7 +18,7 @@ class AlphaTelegramBot:
         self.last_alert_time = {}
     
     async def send_signal(self, setup: Dict, score: Dict, market_data: Dict):
-        """Send trading signal to Telegram"""
+        """Send trading signal with position size"""
         try:
             message = self._format_signal_message(setup, score, market_data)
             
@@ -33,7 +33,7 @@ class AlphaTelegramBot:
             logger.error(f"Signal send error: {e}")
     
     def _format_signal_message(self, setup: Dict, score: Dict, data: Dict) -> str:
-        """Format rich signal message"""
+        """Format rich signal message with position size"""
         asset = setup.get('asset', 'BTC')
         direction = setup.get('direction', 'long')
         
@@ -45,10 +45,21 @@ class AlphaTelegramBot:
         stars = "⭐" * int(total_score / 20)
         
         quality = score.get('setup_quality', 'standard')
-        quality_emoji = "🥇" if quality == 'institutional_grade' else "🥈" if quality == 'professional_grade' else "🥉"
+        quality_emoji = {
+            'institutional_grade': '🏆',
+            'professional_grade': '🥇',
+            'standard': '🥈',
+            'below_standard': '🥉'
+        }.get(quality, '🥉')
         
-        # FIXED: Use timezone-aware datetime
         current_time = datetime.now(timezone.utc).strftime('%H:%M')
+        
+        # Get position size
+        position_size = setup.get('position_size', data.get('position_size', 'N/A'))
+        if isinstance(position_size, (int, float)):
+            position_str = f"{position_size:.3f}" if asset == 'BTC' else f"{position_size:.2f}"
+        else:
+            position_str = str(position_size)
         
         message = (
             f"{dir_emoji} <b>{asset} ALPHA SIGNAL</b> {asset_emoji}\n\n"
@@ -62,11 +73,11 @@ class AlphaTelegramBot:
             f"<b>Verdict:</b> {score.get('recommendation', 'pass').upper()}\n"
             f"━━━━━━━━━━━━━━━━━━━━━\n\n"
             f"💰 <b>TRADE PLAN</b>\n"
-            f"├ Entry: <code>{setup.get('entry_price', 0)}</code>\n"
-            f"├ Stop: <code>{setup.get('stop_loss', 0)}</code>\n"
-            f"├ Target 1: <code>{setup.get('target_1', 0)}</code>\n"
-            f"├ Target 2: <code>{setup.get('target_2', 0)}</code>\n"
-            f"└ Position: Calculated\n\n"
+            f"├ Entry: <code>{setup.get('entry_price', 0):,.2f}</code>\n"
+            f"├ Stop: <code>{setup.get('stop_loss', 0):,.2f}</code>\n"
+            f"├ Target 1: <code>{setup.get('target_1', 0):,.2f}</code>\n"
+            f"├ Target 2: <code>{setup.get('target_2', 0):,.2f}</code>\n"
+            f"└ Position: <code>{position_str} contracts</code>\n\n"
         )
         
         rationale = setup.get('rationale', {})
@@ -74,7 +85,11 @@ class AlphaTelegramBot:
             message += f"🔬 <b>Key Factors:</b>\n"
             for key, value in list(rationale.items())[:3]:
                 display_key = key.replace('_', ' ').title()
-                message += f"├ <i>{display_key}:</i> <code>{str(value)[:30]}</code>\n"
+                if isinstance(value, float):
+                    display_val = f"{value:.4f}" if abs(value) < 1 else f"{value:.2f}"
+                else:
+                    display_val = str(value)[:30]
+                message += f"├ <i>{display_key}:</i> <code>{display_val}</code>\n"
         
         components = score.get('component_scores', {})
         if components:
@@ -85,7 +100,7 @@ class AlphaTelegramBot:
         message += (
             f"\n⏱ <b>Valid:</b> 60 minutes\n"
             f"⚠️ <b>Risk:</b> 1% max per trade\n"
-            f"<i>Alpha Bot v2.0 | {current_time} UTC</i>"
+            f"<i>Alpha Bot v2.2 | {current_time} UTC</i>"
         )
         
         return message
@@ -93,7 +108,6 @@ class AlphaTelegramBot:
     async def send_news_alert(self, title: str, message: str, impact: str = "medium", action: str = ""):
         """Send priority news alert"""
         try:
-            # FIXED: Use timezone-aware datetime
             now = datetime.now(timezone.utc)
             last_time = self.last_alert_time.get(title)
             
@@ -150,7 +164,6 @@ class AlphaTelegramBot:
         emoji = "✅" if result == "win" else "❌" if result == "loss" else "⚪"
         pnl_emoji = "🟢" if pnl_percent > 0 else "🔴"
         
-        # FIXED: Use timezone-aware datetime
         current_time = datetime.now(timezone.utc).strftime('%H:%M:%S')
         
         msg = (
