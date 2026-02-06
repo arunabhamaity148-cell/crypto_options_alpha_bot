@@ -26,7 +26,7 @@ class AlphaTelegramBot:
             await self.bot.send_message(
                 chat_id=self.chat_id,
                 text=message,
-                parse_mode='HTML',  # String literal instead of ParseMode.HTML
+                parse_mode='HTML',
                 disable_web_page_preview=True
             )
             
@@ -67,7 +67,6 @@ class AlphaTelegramBot:
             f"└ Position: Calculated\n\n"
         )
         
-        # Add rationale
         rationale = setup.get('rationale', {})
         if rationale:
             message += f"🔬 <b>Key Factors:</b>\n"
@@ -75,7 +74,6 @@ class AlphaTelegramBot:
                 display_key = key.replace('_', ' ').title()
                 message += f"├ <i>{display_key}:</i> <code>{str(value)[:30]}</code>\n"
         
-        # Score breakdown
         components = score.get('component_scores', {})
         if components:
             message += f"\n📊 <b>Components:</b>\n"
@@ -121,7 +119,7 @@ class AlphaTelegramBot:
             await self.bot.send_message(
                 chat_id=self.chat_id,
                 text=formatted,
-                parse_mode='HTML'  # String literal
+                parse_mode='HTML'
             )
             
             logger.warning(f"News alert sent: {title} ({impact})")
@@ -139,7 +137,7 @@ class AlphaTelegramBot:
             await self.bot.send_message(
                 chat_id=self.chat_id,
                 text=message,
-                parse_mode='HTML'  # String literal
+                parse_mode='HTML'
             )
         except Exception as e:
             logger.error(f"Status send error: {e}")
@@ -164,7 +162,7 @@ class AlphaTelegramBot:
             await self.bot.send_message(
                 chat_id=self.chat_id,
                 text=msg,
-                parse_mode='HTML'  # String literal
+                parse_mode='HTML'
             )
         except Exception as e:
             logger.error(f"Trade close alert error: {e}")
