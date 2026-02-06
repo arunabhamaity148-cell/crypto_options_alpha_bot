@@ -1,12 +1,13 @@
 """
-Multi-Exchange Data Aggregation
+Data Aggregator - Cached for Railway Hobby
+Reduce API calls, faster execution
 """
 
 import asyncio
 import logging
-from typing import Dict, List
+from typing import Dict
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 
 logger = logging.getLogger(__name__)
 
@@ -24,6 +25,20 @@ class AssetData:
 class DataAggregator:
     def __init__(self, stealth_request):
         self.stealth = stealth_request
+        self._cache = {}
+        self._cache_time = {}
+        
+    def _get_cached(self, key: str, ttl: int = 60):
+        """Get cached data if valid"""
+        if key in self._cache and key in self._cache_time:
+            if datetime.now() - self._cache_time[key] < timedelta(seconds=ttl):
+                return self._cache[key]
+        return None
+    
+    def _set_cached(self, key: str, value):
+        """Cache data with timestamp"""
+        self._cache[key] = value
+        self._cache_time[key] = datetime.now()
         
     async def get_all_assets_data(self, assets_config: Dict) -> Dict[str, AssetData]:
         tasks = []
@@ -38,30 +53,31 @@ class DataAggregator:
             if isinstance(result, AssetData):
                 data[result.asset] = result
             elif isinstance(result, Exception):
-                logger.error(f"Asset data fetch error: {result}")
+                logger.error(f"Fetch error: {result}")
         
         return data
     
     async def _fetch_asset_data(self, asset: str, config: Dict) -> AssetData:
         symbol = config['symbol']
         
-        tasks = [
-            self._get_spot_price(symbol),
-            self._get_perp_price(symbol),
-            self._get_funding_rate(symbol),
-            self._get_open_interest(symbol),
-            self._get_24h_volume(symbol),
-            self._get_orderbook(symbol),
-        ]
+        # Parallel fetch with caching
+        spot, perp, funding, oi, volume, ob = await asyncio.gather(
+            self.get_spot_price(symbol),
+            self.get_perp_price(symbol),
+            self.get_funding_rate(symbol),
+            self.get_open_interest(symbol),
+            self.get_24h_volume(symbol),
+            self.get_orderbook(symbol),
+            return_exceptions=True
+        )
         
-        results = await asyncio.gather(*tasks, return_exceptions=True)
-        
-        spot = results[0] if not isinstance(results[0], Exception) else 0
-        perp = results[1] if not isinstance(results[1], Exception) else 0
-        funding = results[2] if not isinstance(results[2], Exception) else 0
-        oi = results[3] if not isinstance(results[3], Exception) else 0
-        volume = results[4] if not isinstance(results[4], Exception) else 0
-        ob = results[5] if not isinstance(results[5], Exception) else {}
+        # Handle exceptions
+        spot = spot if not isinstance(spot, Exception) else 0
+        perp = perp if not isinstance(perp, Exception) else 0
+        funding = funding if not isinstance(funding, Exception) else 0
+        oi = oi if not isinstance(oi, Exception) else 0
+        volume = volume if not isinstance(volume, Exception) else 0
+        ob = ob if not isinstance(ob, Exception) else {}
         
         return AssetData(
             asset=asset,
@@ -74,44 +90,80 @@ class DataAggregator:
             timestamp=datetime.now()
         )
     
-    async def _get_spot_price(self, symbol: str) -> float:
+    async def get_spot_price(self, symbol: str) -> float:
+        """Public method - cached"""
+        cache_key = f"spot_{symbol}"
+        cached = self._get_cached(cache_key, 2)  # 2s TTL
+        if cached:
+            return cached
+            
         data = await self.stealth.get(
             'https://api.binance.com/api/v3/ticker/price',
             {'symbol': symbol}
         )
-        return float(data.get('price', 0))
+        price = float(data.get('price', 0))
+        self._set_cached(cache_key, price)
+        return price
     
-    async def _get_perp_price(self, symbol: str) -> float:
+    async def get_perp_price(self, symbol: str) -> float:
+        cache_key = f"perp_{symbol}"
+        cached = self._get_cached(cache_key, 2)
+        if cached:
+            return cached
+            
         data = await self.stealth.get(
             'https://fapi.binance.com/fapi/v1/ticker/price',
             {'symbol': symbol}
         )
-        return float(data.get('price', 0))
+        price = float(data.get('price', 0))
+        self._set_cached(cache_key, price)
+        return price
     
-    async def _get_funding_rate(self, symbol: str) -> float:
+    async def get_funding_rate(self, symbol: str) -> float:
+        """Cached for 5 minutes"""
+        cache_key = f"funding_{symbol}"
+        cached = self._get_cached(cache_key, 300)
+        if cached:
+            return cached
+            
         data = await self.stealth.get(
             'https://fapi.binance.com/fapi/v1/fundingRate',
             {'symbol': symbol, 'limit': 1}
         )
-        if data and len(data) > 0:
-            return float(data[0].get('fundingRate', 0))
-        return 0
+        rate = float(data[0].get('fundingRate', 0)) if data and len(data) > 0 else 0
+        self._set_cached(cache_key, rate)
+        return rate
     
-    async def _get_open_interest(self, symbol: str) -> float:
+    async def get_open_interest(self, symbol: str) -> float:
+        """Cached for 1 minute"""
+        cache_key = f"oi_{symbol}"
+        cached = self._get_cached(cache_key, 60)
+        if cached:
+            return cached
+            
         data = await self.stealth.get(
             'https://fapi.binance.com/fapi/v1/openInterest',
             {'symbol': symbol}
         )
-        return float(data.get('openInterest', 0))
+        oi = float(data.get('openInterest', 0))
+        self._set_cached(cache_key, oi)
+        return oi
     
-    async def _get_24h_volume(self, symbol: str) -> float:
+    async def get_24h_volume(self, symbol: str) -> float:
+        cache_key = f"vol_{symbol}"
+        cached = self._get_cached(cache_key, 60)
+        if cached:
+            return cached
+            
         data = await self.stealth.get(
             'https://api.binance.com/api/v3/ticker/24hr',
             {'symbol': symbol}
         )
-        return float(data.get('volume', 0)) * float(data.get('weightedAvgPrice', 0))
+        vol = float(data.get('volume', 0)) * float(data.get('weightedAvgPrice', 0))
+        self._set_cached(cache_key, vol)
+        return vol
     
-    async def _get_orderbook(self, symbol: str, limit: int = 100) -> Dict:
+    async def get_orderbook(self, symbol: str, limit: int = 100) -> Dict:
         data = await self.stealth.get(
             'https://api.binance.com/api/v3/depth',
             {'symbol': symbol, 'limit': limit}
@@ -130,9 +182,12 @@ class DataAggregator:
         best_ask = asks[0][0]
         mid_price = (best_bid + best_ask) / 2
         
+        # Calculate metrics
         bid_pressure = sum(b[1] * b[0] for b in bids[:10])
         ask_pressure = sum(a[1] * a[0] for a in asks[:10])
+        total_pressure = bid_pressure + ask_pressure
         
+        # Walls detection
         avg_bid = sum(b[1] for b in bids[:20]) / 20
         avg_ask = sum(a[1] for a in asks[:20]) / 20
         
@@ -147,7 +202,7 @@ class DataAggregator:
             'spread_pct': (best_ask - best_bid) / mid_price * 100,
             'bid_pressure': bid_pressure,
             'ask_pressure': ask_pressure,
-            'ofi_ratio': (bid_pressure - ask_pressure) / (bid_pressure + ask_pressure) if (bid_pressure + ask_pressure) > 0 else 0,
+            'ofi_ratio': (bid_pressure - ask_pressure) / total_pressure if total_pressure > 0 else 0,
             'bid_walls': bid_walls[:3],
             'ask_walls': ask_walls[:3],
         }
