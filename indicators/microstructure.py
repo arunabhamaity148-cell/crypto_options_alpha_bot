@@ -2,7 +2,6 @@
 Microstructure Analysis - OFI, CVD, Liquidity
 """
 
-import numpy as np
 from typing import Dict, Optional, List
 from dataclasses import dataclass
 import logging
@@ -20,24 +19,15 @@ class MicroSignal:
     metadata: Dict
 
 class MicrostructureAnalyzer:
-    """Advanced microstructure analysis"""
-    
     def analyze(self, asset: str, orderbook: Dict, recent_trades: List[Dict]) -> Optional[MicroSignal]:
-        """Main analysis entry point"""
-        
-        # Calculate CVD
         cvd_data = self._calculate_cvd(recent_trades, orderbook.get('mid_price', 0))
-        
-        # Get OFI from orderbook
         ofi = orderbook.get('ofi_ratio', 0)
         
-        # Check for liquidity sweep
         sweep = self._detect_liquidity_sweep(orderbook, cvd_data)
         
         if sweep:
             return self._build_signal(asset, sweep, ofi, cvd_data, orderbook)
         
-        # Check for OFI momentum flip
         flip = self._detect_ofi_flip(ofi, orderbook)
         if flip:
             return self._build_flip_signal(asset, flip, orderbook)
@@ -45,8 +35,6 @@ class MicrostructureAnalyzer:
         return None
     
     def _calculate_cvd(self, trades: List[Dict], mid_price: float) -> Dict:
-        """Calculate Cumulative Volume Delta"""
-        
         buy_volume = 0
         sell_volume = 0
         
@@ -68,23 +56,17 @@ class MicrostructureAnalyzer:
             'buy_volume': buy_volume,
             'sell_volume': sell_volume,
             'delta_ratio': cvd / total if total > 0 else 0,
-            'buy_pressure_pct': (buy_volume / total * 100) if total > 0 else 50,
-            'interpretation': 'aggressive_buying' if cvd > total * 0.1 else 
-                             'aggressive_selling' if cvd < -total * 0.1 else 'neutral'
         }
     
     def _detect_liquidity_sweep(self, orderbook: Dict, cvd: Dict) -> Optional[Dict]:
-        """Detect liquidity sweep pattern"""
-        
         mid = orderbook.get('mid_price', 0)
         voids_below = orderbook.get('liquidity_voids_below', [])
         voids_above = orderbook.get('liquidity_voids_above', [])
         
-        # Check sweep below + reversal
+        # FIXED: Removed invalid syntax "above sweep level"
         if voids_below and cvd.get('delta_ratio', 0) > 0.2:
             sweep_price = voids_below[0][0]
             # Price came back above sweep level
-            above sweep level
             if mid > sweep_price * 1.002:
                 return {
                     'type': 'sweep_low',
@@ -93,7 +75,6 @@ class MicrostructureAnalyzer:
                     'strength': min(95, 70 + cvd.get('delta_ratio', 0) * 50)
                 }
         
-        # Check sweep above + reversal
         if voids_above and cvd.get('delta_ratio', 0) < -0.2:
             sweep_price = voids_above[0][0]
             if mid < sweep_price * 0.998:
@@ -107,8 +88,6 @@ class MicrostructureAnalyzer:
         return None
     
     def _detect_ofi_flip(self, ofi: float, orderbook: Dict) -> Optional[Dict]:
-        """Detect OFI momentum flip"""
-        # Simplified - would need history in production
         if abs(ofi) > 0.3:
             return {
                 'type': 'ofi_extreme',
@@ -118,8 +97,6 @@ class MicrostructureAnalyzer:
         return None
     
     def _build_signal(self, asset: str, sweep: Dict, ofi: float, cvd: Dict, ob: Dict) -> MicroSignal:
-        """Build complete signal from sweep detection"""
-        
         direction = sweep['direction']
         mid = ob.get('mid_price', 0)
         sweep_price = sweep['sweep_price']
@@ -146,14 +123,10 @@ class MicrostructureAnalyzer:
                 'ofi_ratio': ofi,
                 'cvd_delta': cvd.get('cvd', 0),
                 'sweep_price': sweep_price,
-                'bid_walls': ob.get('bid_walls', []),
-                'ask_walls': ob.get('ask_walls', [])
             }
         )
     
     def _build_flip_signal(self, asset: str, flip: Dict, ob: Dict) -> MicroSignal:
-        """Build signal from OFI flip"""
-        
         direction = flip['direction']
         mid = ob.get('mid_price', 0)
         
@@ -175,8 +148,5 @@ class MicrostructureAnalyzer:
             entry_zone=(entry * 0.999, entry * 1.001),
             stop_loss=stop,
             targets=[target1, target2],
-            metadata={
-                'ofi_extreme': True,
-                'pressure_direction': direction
-            }
+            metadata={'ofi_extreme': True}
         )
