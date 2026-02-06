@@ -1,10 +1,10 @@
 """
-Time-based signal filtering
+Time-based signal filtering with HIGH-RISK detection
 """
 
 import logging
 from typing import Dict, Tuple
-from datetime import datetime
+from datetime import datetime, timedelta
 import pytz
 
 logger = logging.getLogger(__name__)
@@ -22,14 +22,6 @@ class TimeFilter:
         current_hour = now.hour
         current_minute = now.minute
         current_weekday = now.strftime('%A')
-        
-        # Friday late check
-        if current_weekday == 'Friday' and current_hour >= 22:
-            return False, {
-                'session': 'Friday Late',
-                'quality': 'avoid',
-                'reason': 'Weekend risk'
-            }
         
         # Weekend check
         if current_weekday in ['Saturday', 'Sunday']:
@@ -61,6 +53,57 @@ class TimeFilter:
             'quality': 'moderate',
             'priority': 3
         }
+    
+    def is_high_risk_time(self) -> Tuple[bool, str]:
+        """Detect high-risk trading periods"""
+        now = datetime.now(self.ist)
+        weekday = now.strftime('%A')
+        hour = now.hour
+        minute = now.minute
+        
+        # Friday after 9 PM IST (high weekend risk)
+        if weekday == 'Friday' and hour >= 21:
+            return True, "Friday late - weekend risk, low liquidity"
+        
+        # Friday after 6 PM IST (reduced size)
+        if weekday == 'Friday' and hour >= 18:
+            return True, "Friday evening - reduce size or avoid"
+        
+        # Weekend
+        if weekday in ['Saturday', 'Sunday']:
+            return True, "Weekend - markets closed or illiquid"
+        
+        # Monday early (Asia open only)
+        if weekday == 'Monday' and hour < 5:
+            return True, "Monday early - wait for better liquidity"
+        
+        # Thursday late (weekly expiry next day)
+        if weekday == 'Thursday' and hour >= 22:
+            return True, "Thursday late - weekly expiry approaching"
+        
+        # Daily: Dead zone 9:30 AM - 12:30 PM IST
+        if 9 <= hour < 12 or (hour == 12 and minute < 30):
+            return True, "Dead zone - Europe not active yet"
+        
+        # Check monthly expiry (last Friday of month)
+        if self.is_monthly_expiry() and weekday == 'Friday':
+            if hour >= 12:
+                return True, "Monthly expiry day - high gamma risk"
+        
+        return False, "OK"
+    
+    def is_monthly_expiry(self) -> bool:
+        """Check if today is last Friday of month"""
+        today = datetime.now(self.ist)
+        # Last day of month
+        next_month = today.replace(day=28) + timedelta(days=4)
+        last_day = next_month - timedelta(days=next_month.day)
+        # Last Friday
+        last_friday = last_day
+        while last_friday.weekday() != 4:  # Friday = 4
+            last_friday -= timedelta(days=1)
+        
+        return today.date() == last_friday.date()
     
     def should_process_signal(self, asset: str, setup: Dict) -> Tuple[bool, str]:
         """Check if should process signal"""
