@@ -1,22 +1,17 @@
 """
-Crypto Options Alpha Bot - FULL AUTO VERSION
-Blind Trust Capable with All Safety Checks
+Crypto Options Alpha Bot - SLEEP MODE ENABLED
+Only runs during golden hours to save Railway resources
 """
 
 import os
 import sys
 import asyncio
 import logging
-import json
-import random
-from datetime import datetime, timezone, timedelta
-from typing import Dict, List, Optional, Tuple, Any
-from dataclasses import dataclass, field
+from datetime import datetime, timezone, timedelta, time
+from typing import Dict, List, Optional
 from threading import Thread
-from collections import deque
 
 from flask import Flask, jsonify
-from telegram import Bot
 
 from config.settings import (
     PORT, 
@@ -28,7 +23,7 @@ from config.settings import (
 )
 from core.websocket_manager import ws_manager
 from core.stealth_request import StealthRequest
-from core.data_aggregator import DataAggregator, AssetData
+from core.data_aggregator import DataAggregator
 from core.multi_asset_manager import MultiAssetManager, TradingSignal
 from core.time_filter import TimeFilter
 from core.news_guard import news_guard
@@ -50,101 +45,153 @@ flask_app = Flask(__name__)
 @flask_app.route('/')
 def home():
     return {
-        'status': 'running',
+        'status': 'sleeping' if bot and bot.is_sleeping else 'active',
         'bot': 'Crypto Options Alpha Bot',
-        'version': '3.0-auto',
-        'timestamp': datetime.now(timezone.utc).isoformat(),
-        'assets': list(ASSETS_CONFIG.keys()),
-        'mode': 'FULL_AUTO'
+        'version': '3.1-sleep-mode',
+        'mode': 'GOLDEN_HOURS_ONLY',
+        'next_run': bot.next_run_time if bot else 'unknown',
+        'timestamp': datetime.now(timezone.utc).isoformat()
     }
 
 @flask_app.route('/health')
 def health():
-    ws_stats = ws_manager.get_stats()
-    perf = bot.performance.get_stats() if bot else {}
     return {
         'status': 'healthy',
-        'websocket': ws_stats,
-        'performance': perf,
+        'mode': 'sleeping' if bot and bot.is_sleeping else 'active',
         'timestamp': datetime.now(timezone.utc).isoformat()
     }, 200
-
-@flask_app.route('/stats')
-def stats():
-    if not bot:
-        return {'error': 'Bot not initialized'}, 500
-    return {
-        'performance': bot.performance.get_stats(),
-        'today_trades': bot.performance.today_stats(),
-        'consecutive_losses': bot.performance.consecutive_losses,
-        'win_rate': bot.performance.get_win_rate(),
-        'profit_factor': bot.performance.get_profit_factor()
-    }
 
 # ============== MAIN BOT CLASS ==============
 class AlphaBot:
     def __init__(self):
         self.telegram = AlphaTelegramBot(TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID)
-        self.stealth = StealthRequest(STEALTH_CONFIG)
-        self.data_agg = DataAggregator(self.stealth)
-        self.asset_manager = MultiAssetManager(TRADING_CONFIG, ASSETS_CONFIG)
         self.time_filter = TimeFilter()
-        self.news_guard = news_guard
-        self.trade_monitor = TradeMonitor(self.telegram)
-        self.market_context = MarketContext()
-        self.performance = PerformanceTracker()
+        self.is_sleeping = False
+        self.next_run_time = None
         self.running = False
+        
+        # Only initialize if in golden hours (lazy loading)
+        self._components = None
+        
+    def _init_components(self):
+        """Initialize components only when needed"""
+        if self._components is not None:
+            return self._components
+            
+        logger.info("🔄 Initializing trading components...")
+        
+        self._components = {
+            'stealth': StealthRequest(STEALTH_CONFIG),
+            'data_agg': None,  # Will init on first use
+            'asset_manager': MultiAssetManager(TRADING_CONFIG, ASSETS_CONFIG),
+            'trade_monitor': TradeMonitor(self.telegram),
+            'market_context': MarketContext(),
+            'performance': PerformanceTracker()
+        }
+        
         self.cycle_count = 0
         self.last_signal_time = None
         self.signals_sent_this_hour = 0
         self.hour_start = datetime.now(timezone.utc)
-        self.deploy_time = datetime.now(timezone.utc)
-        self.auto_mode = True  # Full auto mode
+        
+        return self._components
         
     async def run(self):
-        """Main bot loop - FULL AUTO MODE"""
+        """Main loop with sleep mode"""
         self.running = True
-        logger.info("🚀 Bot v3.0-FULL-AUTO starting")
-        logger.info(f"Deploy time: {self.deploy_time.isoformat()}")
+        logger.info("🚀 Bot v3.1-SLEEP-MODE starting")
         
-        # Start WebSocket
-        ws_task = asyncio.create_task(ws_manager.start(ASSETS_CONFIG))
-        await asyncio.sleep(3)
-        
-        # Start Trade Monitor
-        monitor_task = asyncio.create_task(
-            self.trade_monitor.start_monitoring(self.get_current_price)
-        )
-        
-        # Start Flask
+        # Start Flask (always running for health checks)
         flask_thread = Thread(target=self._run_flask, daemon=True)
         flask_thread.start()
         
-        # Startup message
-        try:
-            await self.telegram.send_status(
-                "🟢 Bot v3.0 FULL AUTO Started\n"
-                f"Assets: {', '.join(ASSETS_CONFIG.keys())}\n"
-                f"Mode: {'AUTO' if self.auto_mode else 'MANUAL'}\n"
-                f"Threshold: {TRADING_CONFIG['min_score_threshold']}+\n"
-                "✅ All safety checks enabled"
-            )
-        except Exception as e:
-            logger.error(f"Startup message failed: {e}")
-        
-        # Main loop
         while self.running:
             try:
+                # Check if should run or sleep
+                should_run, sleep_seconds, reason = self.time_filter.should_bot_run()
+                
+                if not should_run:
+                    await self._enter_sleep_mode(sleep_seconds, reason)
+                    continue
+                
+                # Golden hour - start trading
+                await self._start_trading_session()
+                
+            except Exception as e:
+                logger.error(f"Main loop error: {e}", exc_info=True)
+                await asyncio.sleep(60)
+    
+    async def _enter_sleep_mode(self, sleep_seconds: int, reason: str):
+        """Enter sleep mode to save Railway resources"""
+        self.is_sleeping = True
+        sleep_hours = sleep_seconds / 3600
+        
+        self.next_run_time = (datetime.now(timezone.utc) + 
+                             timedelta(seconds=sleep_seconds)).isoformat()
+        
+        logger.info(f"😴 SLEEP MODE: {reason}")
+        logger.info(f"   Sleeping for {sleep_hours:.1f} hours")
+        logger.info(f"   Next run: {self.next_run_time}")
+        
+        # Send sleep notification (once)
+        if not hasattr(self, '_sleep_notified'):
+            await self.telegram.send_status(
+                f"😴 <b>Bot Entering Sleep Mode</b>\n\n"
+                f"Reason: {reason}\n"
+                f"Duration: {sleep_hours:.1f} hours\n"
+                f"Next Run: {self.next_run_time[:16]} UTC\n\n"
+                f"<i>Saving Railway resources...</i>"
+            )
+            self._sleep_notified = True
+        
+        # Deep sleep - minimal resource usage
+        # Wake up 2 minutes early to initialize
+        actual_sleep = max(0, sleep_seconds - 120)
+        
+        if actual_sleep > 0:
+            await asyncio.sleep(actual_sleep)
+        
+        # Reset notification flag
+        self._sleep_notified = False
+        self.is_sleeping = False
+        logger.info("⏰ Waking up from sleep mode...")
+    
+    async def _start_trading_session(self):
+        """Start trading during golden hours"""
+        logger.info("🌟 GOLDEN HOUR - Starting trading session")
+        
+        # Initialize components
+        comps = self._init_components()
+        
+        # Send wake notification
+        await self.telegram.send_status(
+            "🌟 <b>Golden Hour Started</b>\n\n"
+            "Trading session active\n"
+            "Monitoring for high-quality signals..."
+        )
+        
+        # Start WebSocket
+        ws_task = asyncio.create_task(ws_manager.start(ASSETS_CONFIG))
+        await asyncio.sleep(3)  # Quick warmup during golden hour
+        
+        # Start trade monitor
+        monitor_task = asyncio.create_task(
+            comps['trade_monitor'].start_monitoring(self._get_current_price)
+        )
+        
+        # Trading loop - run until golden hour ends
+        session_active = True
+        while session_active and self.running:
+            try:
+                # Check if still golden hour
+                should_run, _, _ = self.time_filter.should_bot_run()
+                if not should_run:
+                    logger.info("Golden hour ended - stopping session")
+                    session_active = False
+                    break
+                
                 self.cycle_count += 1
                 cycle_start = datetime.now(timezone.utc)
-                
-                # WARMUP: 5 minutes after deploy
-                elapsed = (cycle_start - self.deploy_time).total_seconds()
-                if elapsed < 300:
-                    remaining = 300 - elapsed
-                    logger.info(f"⏸️ WARMUP: {remaining:.0f}s remaining")
-                    await asyncio.sleep(min(60, remaining))
-                    continue
                 
                 # Reset hourly counter
                 if (cycle_start - self.hour_start).seconds >= 3600:
@@ -152,59 +199,189 @@ class AlphaBot:
                     self.hour_start = cycle_start
                 
                 # Check daily reset
-                if self.asset_manager.should_reset_daily():
-                    self.asset_manager.reset_daily_counters()
-                    self.performance.reset_daily()
+                if comps['asset_manager'].should_reset_daily():
+                    comps['asset_manager'].reset_daily_counters()
+                    comps['performance'].reset_daily()
                 
-                # Performance-based circuit breaker
-                if self.performance.consecutive_losses >= 3:
-                    logger.error("🚨 CIRCUIT BREAKER: 3 consecutive losses")
+                # Circuit breaker
+                if comps['performance'].consecutive_losses >= 3:
+                    logger.error("🚨 Circuit breaker - 3 losses")
                     await self.telegram.send_alert(
-                        "CIRCUIT BREAKER",
-                        "3 consecutive losses. Trading paused for 1 hour.",
+                        "CIRCUIT BREAKER", 
+                        "3 consecutive losses. Stopping for today.",
                         "high"
                     )
-                    await asyncio.sleep(3600)
-                    self.performance.consecutive_losses = 0
-                    continue
+                    break
                 
-                # Get time quality
-                try:
-                    time_ok, time_info = self.time_filter.is_best_time()
-                    time_quality = time_info.get('quality', 'moderate')
-                except Exception as e:
-                    logger.error(f"Time filter error: {e}")
-                    time_quality = 'moderate'
+                # Fetch and process data
+                await self._process_cycle(comps)
                 
-                # STRICT: Check global cooldown (30 min)
-                if self.last_signal_time:
-                    cooldown_remaining = 1800 - (cycle_start - self.last_signal_time).total_seconds()
-                    if cooldown_remaining > 0:
-                        logger.info(f"⏸️ Global cooldown: {cooldown_remaining/60:.1f}min left")
-                        await asyncio.sleep(min(60, cooldown_remaining))
-                        continue
-                
-                # Fetch data
-                logger.info(f"=== Cycle {self.cycle_count} | {time_quality} ===")
-                market_data = await self.data_agg.get_all_assets_data(ASSETS_CONFIG)
-                ws_data = self._get_websocket_data()
-                
-                # Merge with priority to WebSocket for real-time
-                merged_data = self._merge_data(market_data, ws_data)
-                
-                if merged_data:
-                    await self._process_market_data(merged_data, time_quality)
-                
-                # Adaptive sleep
-                cycle_duration = (datetime.now(timezone.utc) - cycle_start).total_seconds()
-                sleep_time = 60 if time_quality in ['excellent', 'good'] else 120
-                
-                logger.info(f"Cycle complete | Duration: {cycle_duration:.1f}s | Sleep: {sleep_time}s")
-                await asyncio.sleep(sleep_time)
+                # Sleep between cycles (faster during golden hour)
+                await asyncio.sleep(45)  # 45 sec vs 60 sec normal
                 
             except Exception as e:
-                logger.error(f"Cycle error: {e}", exc_info=True)
-                await asyncio.sleep(60)
+                logger.error(f"Trading cycle error: {e}")
+                await asyncio.sleep(30)
+        
+        # Cleanup session
+        ws_manager.stop()
+        comps['trade_monitor'].stop_monitoring()
+        logger.info("Trading session ended")
+    
+    async def _process_cycle(self, comps: Dict):
+        """Process one trading cycle"""
+        from strategies.liquidity_hunt import LiquidityHuntStrategy
+        from strategies.gamma_squeeze import GammaSqueezeStrategy
+        from indicators.greeks_engine import GreeksEngine
+        from signals.scorer import AlphaScorer
+        
+        # Check limits
+        if self.signals_sent_this_hour >= 2:
+            return
+        
+        # Fetch data
+        logger.info(f"=== Cycle {self.cycle_count} ===")
+        
+        if comps['data_agg'] is None:
+            comps['data_agg'] = DataAggregator(comps['stealth'])
+        
+        market_data = await comps['data_agg'].get_all_assets_data(ASSETS_CONFIG)
+        ws_data = self._get_websocket_data()
+        merged_data = self._merge_data(market_data, ws_data)
+        
+        if not merged_data:
+            return
+        
+        # Process each asset
+        signals = []
+        for asset, data in merged_data.items():
+            if not comps['asset_manager'].can_send_signal(asset):
+                continue
+            
+            current_price = await self._get_current_price(asset)
+            if current_price == 0:
+                continue
+            
+            # Check market context
+            context = comps['market_context'].analyze({
+                'orderbook': data.orderbook,
+                'funding_rate': data.funding_rate,
+                'asset': asset
+            })
+            
+            if not context['trade_allowed']:
+                continue
+            
+            # Strategy
+            try:
+                strategy = LiquidityHuntStrategy(asset, ASSETS_CONFIG[asset])
+                recent_trades = ws_manager.get_recent_trades(ASSETS_CONFIG[asset]['symbol'], 30)
+                
+                setup = await strategy.analyze(
+                    {
+                        'orderbook': data.orderbook,
+                        'funding_rate': data.funding_rate,
+                        'current_price': current_price
+                    },
+                    recent_trades
+                )
+                
+                if setup:
+                    setup['asset'] = asset
+                    setup['current_price'] = current_price
+                    setup['context'] = context
+                    signals.append(('liquidity_hunt', setup))
+                    
+            except Exception as e:
+                logger.error(f"Strategy error: {e}")
+        
+        # Score and send
+        if signals:
+            await self._execute_best_signal(signals, merged_data, comps)
+    
+    async def _execute_best_signal(self, signals: List, market_data: Dict, comps: Dict):
+        """Execute best signal"""
+        from signals.scorer import AlphaScorer
+        
+        scorer = AlphaScorer(TRADING_CONFIG)
+        scored = []
+        
+        for name, setup in signals:
+            asset = setup['asset']
+            data = market_data[asset]
+            
+            current_price = await self._get_current_price(asset)
+            setup['entry_price'] = current_price
+            setup['stop_loss'] = current_price * 0.992 if setup['direction'] == 'long' else current_price * 1.008
+            setup['target_1'] = current_price * 1.018 if setup['direction'] == 'long' else current_price * 0.982
+            setup['target_2'] = current_price * 1.030 if setup['direction'] == 'long' else current_price * 0.970
+            
+            score = scorer.calculate_score(
+                setup,
+                {
+                    'orderbook': data.orderbook,
+                    'funding_rate': data.funding_rate,
+                    'spot_price': current_price
+                },
+                time_quality='excellent'
+            )
+            
+            setup['score_data'] = score
+            setup['total_score'] = score['total_score']
+            scored.append((name, setup, score))
+        
+        if not scored:
+            return
+        
+        scored.sort(key=lambda x: x[2]['total_score'], reverse=True)
+        best = scored[0]
+        name, setup, score = best
+        
+        if score['total_score'] < 85:
+            return
+        
+        # Position size with risk adjustment
+        position_size = comps['asset_manager'].calculate_position_size(
+            setup['asset'],
+            setup['entry_price'],
+            setup['stop_loss'],
+            setup.get('context', {}).get('risk_level', 'normal')
+        )
+        
+        position_size *= setup.get('context', {}).get('position_size_mult', 1.0)
+        setup['position_size'] = position_size
+        
+        # Send signal
+        await self.telegram.send_signal(setup, score, {
+            'orderbook': market_data[setup['asset']].orderbook,
+            'position_size': position_size
+        })
+        
+        # Add to monitor
+        trade = ActiveTrade(
+            asset=setup['asset'],
+            direction=setup['direction'],
+            entry_price=setup['entry_price'],
+            stop_loss=setup['stop_loss'],
+            tp1=setup['target_1'],
+            tp2=setup['target_2'],
+            strike=setup['strike_selection'],
+            expiry=datetime.now(timezone.utc) + timedelta(hours=48),
+            position_size=position_size,
+            auto_manage=True
+        )
+        comps['trade_monitor'].add_trade(trade)
+        
+        comps['asset_manager'].record_signal(
+            setup['asset'],
+            setup['direction'],
+            setup['entry_price']
+        )
+        
+        self.last_signal_time = datetime.now(timezone.utc)
+        self.signals_sent_this_hour += 1
+        
+        logger.info(f"✅ Signal sent: {setup['asset']} @ {score['total_score']}")
     
     def _get_websocket_data(self) -> Dict:
         ws_data = {}
@@ -217,323 +394,23 @@ class AlphaBot:
         return ws_data
     
     def _merge_data(self, rest_data: Dict, ws_data: Dict) -> Dict:
-        """Merge with WebSocket priority for real-time prices"""
         merged = rest_data.copy()
         for asset, ws_info in ws_data.items():
             if asset in merged:
-                if 'trades' in ws_info:
-                    merged[asset].recent_trades = ws_info['trades']
                 if 'last_price' in ws_info:
                     merged[asset].spot_price = ws_info['last_price']
                 if 'orderbook' in ws_info:
-                    ws_ob = ws_info['orderbook']
-                    if 'ofi_ratio' in ws_ob:
-                        merged[asset].orderbook['ofi_ratio'] = ws_ob['ofi_ratio']
-                    if 'bid_walls' in ws_ob:
-                        merged[asset].orderbook['bid_walls'] = ws_ob['bid_walls']
-                    if 'ask_walls' in ws_ob:
-                        merged[asset].orderbook['ask_walls'] = ws_ob['ask_walls']
-                    if 'mid_price' in ws_ob:
-                        merged[asset].orderbook['mid_price'] = ws_ob['mid_price']
+                    for key in ['ofi_ratio', 'bid_walls', 'ask_walls', 'mid_price']:
+                        if key in ws_info['orderbook']:
+                            merged[asset].orderbook[key] = ws_info['orderbook'][key]
         return merged
     
-    async def get_current_price(self, asset: str) -> float:
-        """Get current price - WebSocket priority"""
+    async def _get_current_price(self, asset: str) -> float:
         symbol = ASSETS_CONFIG[asset]['symbol']
         ws_data = ws_manager.get_price_data(symbol)
         if ws_data and 'last_price' in ws_data:
             return ws_data['last_price']
-        try:
-            return await self.data_agg.get_spot_price(symbol)
-        except:
-            return 0
-    
-    async def _process_market_data(self, market_data: Dict, time_quality: str):
-        """Process with ALL safety checks"""
-        from strategies.liquidity_hunt import LiquidityHuntStrategy
-        from strategies.gamma_squeeze import GammaSqueezeStrategy
-        from indicators.greeks_engine import GreeksEngine
-        from signals.scorer import AlphaScorer
-        
-        # STRICT: Max 2 signals per hour globally
-        if self.signals_sent_this_hour >= 2:
-            logger.info("🚫 Hourly signal limit reached (2)")
-            return
-        
-        # Check high-risk times
-        is_high_risk, risk_reason = self.time_filter.is_high_risk_time()
-        if is_high_risk:
-            logger.warning(f"🚫 HIGH RISK TIME: {risk_reason}")
-            return
-        
-        # Check expiry risk
-        expiry_ok, expiry_msg = self.news_guard.check_expiry_risk()
-        if not expiry_ok:
-            logger.warning(f"🚫 EXPIRY RISK: {expiry_msg}")
-            return
-        
-        signals = []
-        
-        for asset, data in market_data.items():
-            # Check if can send
-            if not self.asset_manager.can_send_signal(asset):
-                continue
-            
-            config = ASSETS_CONFIG[asset]
-            symbol = config['symbol']
-            recent_trades = ws_manager.get_recent_trades(symbol, 30)
-            
-            # Get REAL-TIME current price for entry
-            current_price = await self.get_current_price(asset)
-            if current_price == 0:
-                logger.warning(f"No price for {asset}, skipping")
-                continue
-            
-            # Get market context
-            context = self.market_context.analyze({
-                'orderbook': data.orderbook,
-                'funding_rate': data.funding_rate,
-                'recent_trades': recent_trades,
-                'asset': asset
-            })
-            
-            if not context['trade_allowed']:
-                logger.warning(f"🚫 {asset}: Market context blocked - {context['reason']}")
-                continue
-            
-            # Strategy 1: Liquidity Hunt
-            try:
-                lh_strategy = LiquidityHuntStrategy(asset, config)
-                lh_setup = await lh_strategy.analyze(
-                    {
-                        'orderbook': data.orderbook, 
-                        'funding_rate': data.funding_rate,
-                        'current_price': current_price,
-                        'market_context': context
-                    }, 
-                    recent_trades
-                )
-                
-                if lh_setup:
-                    lh_setup['asset'] = asset
-                    lh_setup['current_price'] = current_price
-                    lh_setup['context'] = context
-                    signals.append(('liquidity_hunt', lh_setup))
-                    logger.info(f"🎯 LH Signal: {asset} @ {lh_setup.get('confidence', 0)}")
-                    
-            except Exception as e:
-                logger.error(f"LH error: {e}")
-            
-            # Strategy 2: Gamma Squeeze (only excellent time)
-            if time_quality == 'excellent':
-                try:
-                    greeks = GreeksEngine()
-                    gs_strategy = GammaSqueezeStrategy(asset, config, greeks)
-                    gs_setup = await gs_strategy.analyze(
-                        {'orderbook': data.orderbook},
-                        []
-                    )
-                    
-                    if gs_setup:
-                        gs_setup['asset'] = asset
-                        gs_setup['current_price'] = current_price
-                        gs_setup['context'] = context
-                        signals.append(('gamma_squeeze', gs_setup))
-                        logger.info(f"🎯 GS Signal: {asset} @ {gs_setup.get('confidence', 0)}")
-                        
-                except Exception as e:
-                    logger.error(f"GS error: {e}")
-        
-        if signals:
-            await self._score_and_send_signals(signals, market_data, time_quality)
-    
-    async def _score_and_send_signals(self, signals: List, market_data: Dict, time_quality: str):
-        """Score and send with FULL VALIDATION"""
-        from signals.scorer import AlphaScorer
-        
-        scorer = AlphaScorer(TRADING_CONFIG)
-        scored_signals = []
-        
-        # Score all signals
-        for strategy_name, setup in signals:
-            asset = setup['asset']
-            data = market_data.get(asset)
-            context = setup.get('context', {})
-            if not data:
-                continue
-            
-            # GET REAL-TIME PRICE
-            current_price = await self.get_current_price(asset)
-            if current_price == 0:
-                logger.warning(f"No current price for {asset}")
-                continue
-            
-            # VALIDATE: Signal price vs Market price
-            signal_price = setup.get('entry_price', 0)
-            if signal_price == 0:
-                logger.warning(f"No signal price for {asset}")
-                continue
-            
-            slippage = abs(signal_price - current_price) / current_price
-            
-            if slippage > 0.003:  # 0.3% max slippage
-                logger.warning(f"🚫 {asset}: Slippage {slippage:.2%} too high")
-                logger.warning(f"   Signal: {signal_price:,.2f} | Market: {current_price:,.2f}")
-                continue
-            
-            # UPDATE to real market price
-            setup['entry_price'] = current_price
-            setup['stop_loss'] = current_price * 0.992 if setup['direction'] == 'long' else current_price * 1.008
-            setup['target_1'] = current_price * 1.018 if setup['direction'] == 'long' else current_price * 0.982
-            setup['target_2'] = current_price * 1.030 if setup['direction'] == 'long' else current_price * 0.970
-            
-            # Apply position size multiplier from context
-            position_mult = context.get('position_size_mult', 1.0)
-            
-            logger.info(f"✅ {asset}: Price validated | Slippage: {slippage:.3%} | Size mult: {position_mult}")
-            
-            # Prepare market data for scoring
-            score_data = {
-                'orderbook': data.orderbook,
-                'funding_rate': data.funding_rate,
-                'spot_price': current_price,
-                'perp_price': data.perp_price,
-            }
-            
-            score = scorer.calculate_score(
-                setup, 
-                score_data,
-                news_status="safe",
-                time_quality=time_quality
-            )
-            
-            setup['score_data'] = score
-            setup['total_score'] = score['total_score']
-            setup['position_mult'] = position_mult
-            scored_signals.append((strategy_name, setup, score))
-            
-            logger.info(f"📊 {asset} | Score: {score['total_score']} | Rec: {score['recommendation']}")
-        
-        if not scored_signals:
-            logger.info("No valid signals after price validation")
-            return
-        
-        # Sort by score
-        scored_signals.sort(key=lambda x: x[2]['total_score'], reverse=True)
-        
-        # Take ONLY TOP 1
-        best = scored_signals[0]
-        strategy_name, setup, score = best
-        
-        total_score = score['total_score']
-        threshold = TRADING_CONFIG['min_score_threshold']
-        
-        # STRICT: Must be above threshold
-        if total_score < threshold:
-            logger.info(f"Best signal {total_score} below threshold {threshold}")
-            return
-        
-        # STRICT: Exceptional (90+) or good time with 85+
-        if time_quality not in ['excellent', 'good'] and total_score < 90:
-            logger.info(f"Moderate time, score {total_score} < 90, skipping")
-            return
-        
-        # Check can send with direction
-        if not self.asset_manager.can_send_signal(
-            setup['asset'], 
-            setup['direction'],
-            setup['entry_price']
-        ):
-            logger.info(f"Cannot send {setup['asset']} - cooldown or opposite active")
-            return
-        
-        # Calculate position size with context multiplier
-        position_size = self.asset_manager.calculate_position_size(
-            setup['asset'], 
-            setup['entry_price'], 
-            setup['stop_loss'],
-            risk_level=setup.get('context', {}).get('risk_level', 'normal')
-        )
-        
-        # Apply context multiplier
-        position_mult = setup.get('position_mult', 1.0)
-        position_size *= position_mult
-        
-        setup['position_size'] = position_size
-        
-        # Build signal
-        signal = TradingSignal(
-            asset=setup['asset'],
-            strategy=strategy_name,
-            direction=setup['direction'],
-            entry_price=setup['entry_price'],
-            stop_loss=setup['stop_loss'],
-            target_1=setup['target_1'],
-            target_2=setup['target_2'],
-            strike_selection=setup['strike_selection'],
-            expiry_suggestion=setup['expiry_suggestion'],
-            confidence=setup['confidence'],
-            score_breakdown=score['component_scores'],
-            rationale=setup['rationale'],
-            timestamp=datetime.now(timezone.utc),
-            total_score=total_score
-        )
-        
-        # AUTO EXECUTE or CONFIRM based on settings
-        await self._execute_signal(signal, setup, score, market_data)
-    
-    async def _execute_signal(self, signal: TradingSignal, setup: Dict, score: Dict, market_data: Dict):
-        """Execute with auto-management"""
-        
-        # Log signal
-        print("\n" + "="*60)
-        print(f"🚨 SIGNAL: {signal.asset} {signal.direction.upper()}")
-        print(f"Score: {signal.total_score}/100 | Strategy: {signal.strategy}")
-        print(f"Entry: {signal.entry_price:,.2f} | Stop: {signal.stop_loss:,.2f}")
-        print(f"Targets: {signal.target_1:,.2f} / {signal.target_2:,.2f}")
-        print(f"Position: {setup['position_size']:.3f} contracts")
-        print("="*60 + "\n")
-        
-        # Send to Telegram
-        await self.telegram.send_signal(setup, score, {
-            'orderbook': market_data[signal.asset].orderbook,
-            'position_size': setup['position_size']
-        })
-        
-        # Add to trade monitor with auto-management
-        trade = ActiveTrade(
-            asset=signal.asset,
-            direction=signal.direction,
-            entry_price=signal.entry_price,
-            stop_loss=signal.stop_loss,
-            tp1=signal.target_1,
-            tp2=signal.target_2,
-            strike=signal.strike_selection,
-            expiry=datetime.now(timezone.utc) + timedelta(hours=48),
-            position_size=setup['position_size']
-        )
-        
-        # Enable auto-management
-        trade.auto_manage = True
-        trade.be_triggered = False
-        trade.tp1_triggered = False
-        
-        self.trade_monitor.add_trade(trade)
-        
-        # Record signal
-        self.asset_manager.record_signal(
-            signal.asset, 
-            signal.direction,
-            signal.entry_price
-        )
-        
-        # Update counters
-        self.last_signal_time = datetime.now(timezone.utc)
-        self.signals_sent_this_hour += 1
-        
-        logger.info(f"✅ AUTO EXECUTED: {signal.asset} {signal.direction} @ {signal.total_score}")
-        
-        await asyncio.sleep(2)
+        return 0
     
     def _run_flask(self):
         flask_app.run(
@@ -547,20 +424,13 @@ class AlphaBot:
     def stop(self):
         self.running = False
         ws_manager.stop()
-        self.trade_monitor.stop_monitoring()
-        logger.info("Bot stopped")
 
-# Global bot instance for Flask routes
+# Global
 bot = None
 
-# ============== ENTRY POINT ==============
 if __name__ == "__main__":
     bot = AlphaBot()
     try:
         asyncio.run(bot.run())
     except KeyboardInterrupt:
         bot.stop()
-        logger.info("Stopped by user")
-    except Exception as e:
-        logger.error(f"Fatal error: {e}", exc_info=True)
-        raise
