@@ -1,6 +1,6 @@
 """
 Crypto Options Alpha Bot - Main Entry Point
-Fixed: telegram -> tg_bot folder rename
+Fixed: telegram -> tg_bot folder, ParseMode removed (use string literals)
 """
 
 import os
@@ -16,8 +16,8 @@ from threading import Thread
 # Flask for Railway
 from flask import Flask, jsonify
 
-# Telegram (python-telegram-bot library)
-from telegram import Bot, ParseMode
+# Telegram (python-telegram-bot library) - FIXED: No ParseMode import
+from telegram import Bot
 
 # Local imports - using tg_bot (renamed from telegram)
 from config.settings import (
@@ -34,7 +34,7 @@ from core.data_aggregator import DataAggregator, AssetData
 from core.multi_asset_manager import MultiAssetManager, TradingSignal
 from core.time_filter import TimeFilter
 from core.news_guard import news_guard
-from tg_bot.bot import AlphaTelegramBot  # CHANGED: telegram -> tg_bot
+from tg_bot.bot import AlphaTelegramBot
 
 # Setup logging
 logging.basicConfig(
@@ -127,7 +127,7 @@ class AlphaBot:
                 if not trading_allowed:
                     logger.warning(f"🛑 Trading halted: {news_reason}")
                     await self.telegram.send_status(f"⏸️ <b>TRADING HALTED</b>\n\n{news_reason}")
-                    await asyncio.sleep(300)  # Wait 5 minutes
+                    await asyncio.sleep(300)
                     continue
                 
                 if "caution" in news_reason.lower():
@@ -168,7 +168,7 @@ class AlphaBot:
                 continue
             
             # Check time filter
-            mock_setup = {'confidence': 90}  # Will be updated with actual score
+            mock_setup = {'confidence': 90}
             time_ok, time_reason = self.time_filter.should_process_signal(asset, mock_setup)
             
             if not time_ok:
@@ -199,7 +199,6 @@ class AlphaBot:
                 greeks = GreeksEngine()
                 gs_strategy = GammaSqueezeStrategy(asset, config, greeks)
                 
-                # Mock options chain (would come from actual API)
                 options_chain = []
                 gs_setup = await gs_strategy.analyze(
                     {'orderbook': data.orderbook},
@@ -232,7 +231,6 @@ class AlphaBot:
             if not data:
                 continue
             
-            # Calculate comprehensive score
             score = scorer.calculate_score(
                 setup, 
                 {'orderbook': data.orderbook},
@@ -278,7 +276,6 @@ class AlphaBot:
             if not self.asset_manager.can_send_signal(signal.asset):
                 continue
             
-            # Get score data
             original = next((s for s in scored_signals if s[1]['asset'] == signal.asset), None)
             if not original:
                 continue
@@ -293,7 +290,6 @@ class AlphaBot:
                 self.asset_manager.record_signal(signal.asset)
                 logger.info(f"✅ Signal sent: {signal.asset} @ {score['total_score']}")
                 
-                # Small delay between messages
                 await asyncio.sleep(2)
                 
             except Exception as e:
