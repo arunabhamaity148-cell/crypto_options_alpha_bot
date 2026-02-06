@@ -1,5 +1,5 @@
 """
-Liquidity Hunt Strategy - 75%+ Win Rate
+Liquidity Hunt Strategy - Fixed with Real-Time Entry
 """
 
 from typing import Dict, Optional
@@ -17,7 +17,9 @@ class LiquidityHuntStrategy:
         from indicators.microstructure import MicrostructureAnalyzer
         
         orderbook = market_data.get('orderbook', {})
-        if not orderbook:
+        current_price = market_data.get('current_price', 0)
+        
+        if not orderbook or not current_price:
             return None
         
         analyzer = MicrostructureAnalyzer()
@@ -26,28 +28,45 @@ class LiquidityHuntStrategy:
         if not signal or signal.strength < self.min_score:
             return None
         
-        return self._build_setup(signal, market_data)
+        return self._build_setup(signal, market_data, current_price)
     
-    def _build_setup(self, signal, data: Dict) -> Dict:
-        mid = data.get('orderbook', {}).get('mid_price', 0)
+    def _build_setup(self, signal, data: Dict, current_price: float) -> Dict:
+        """Build setup with REAL-TIME current price as entry"""
+        direction = signal.direction
         
         step = self.config.get('strike_step', 100)
-        strike = round(mid / step) * step
         
-        option_type = 'CE' if signal.direction == 'long' else 'PE'
+        # Use CURRENT real-time price for entry (not historical)
+        entry = current_price
+        
+        # Round strike to nearest step
+        if direction == 'long':
+            strike = round((entry + step/2) / step) * step
+            option_type = 'CE'
+            stop = entry * 0.992  # 0.8% stop
+            target1 = entry * 1.018  # 1.8% target
+            target2 = entry * 1.030  # 3% target
+        else:
+            strike = round((entry - step/2) / step) * step
+            option_type = 'PE'
+            stop = entry * 1.008  # 0.8% stop
+            target1 = entry * 0.982  # 1.8% target
+            target2 = entry * 0.970  # 3% target
         
         return {
             'strategy': 'liquidity_hunt_reversal',
-            'direction': signal.direction,
-            'entry_price': round((signal.entry_zone[0] + signal.entry_zone[1]) / 2, 2),
-            'stop_loss': round(signal.stop_loss, 2),
-            'target_1': round(signal.targets[0], 2),
-            'target_2': round(signal.targets[1], 2),
+            'direction': direction,
+            'entry_price': round(entry, 2),
+            'stop_loss': round(stop, 2),
+            'target_1': round(target1, 2),
+            'target_2': round(target2, 2),
             'confidence': signal.strength,
             'strike_selection': f"{strike} {option_type}",
             'expiry_suggestion': '24-48h',
             'rationale': {
                 'signal_type': signal.signal_type,
+                'ofi_ratio': signal.metadata.get('ofi_ratio', 0),
+                'cvd_delta': signal.metadata.get('cvd_delta', 0),
                 **signal.metadata
             }
         }
