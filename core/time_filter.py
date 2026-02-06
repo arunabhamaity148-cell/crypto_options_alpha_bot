@@ -1,40 +1,86 @@
 """
 Time-based signal filtering
-Integrates with main bot
 """
 
 import logging
 from typing import Dict, Tuple
-from config.trading_hours import trading_hours, TRADING_SESSIONS
+from datetime import datetime
+import pytz
 
 logger = logging.getLogger(__name__)
 
-class TimeFilter:
-    """Filters signals based on trading hours"""
+IST = pytz.timezone('Asia/Kolkata')
+
+# Embedded trading hours config
+TRADING_SESSIONS = {
+    'best': {
+        'us_market_open': {
+            'name': 'US Market Open',
+            'utc_start': '13:30',
+            'utc_end': '16:00',
+            'description': 'Highest volatility',
+            'priority': 1,
+            'assets': ['BTC', 'ETH', 'SOL'],
+            'expected_moves': '1.5-3%'
+        }
+    },
+    'moderate': {},
+    'avoid': {}
+}
+
+class TradingHoursManager:
+    def __init__(self):
+        self.ist = IST
+        
+    def get_current_ist_time(self) -> datetime:
+        return datetime.now(self.ist)
     
+    def is_best_time(self, asset: str = None) -> Tuple[bool, Dict]:
+        now = self.get_current_ist_time()
+        current_hour = now.hour
+        current_minute = now.minute
+        
+        # US Market Open: 7:00 PM - 9:30 PM IST (19:00 - 21:30)
+        if 19 <= current_hour < 21 or (current_hour == 21 and current_minute <= 30):
+            return True, {
+                'session': 'US Market Open',
+                'quality': 'excellent',
+                'priority': 1,
+                'expected_move': '1.5-3%'
+            }
+        
+        # Moderate times
+        if 17 <= current_hour < 19:  # Europe overlap
+            return True, {
+                'session': 'Europe-US Overlap',
+                'quality': 'moderate',
+                'priority': 2
+            }
+        
+        return True, {
+            'session': 'Regular hours',
+            'quality': 'moderate',
+            'priority': 3
+        }
+
+trading_hours = TradingHoursManager()
+
+class TimeFilter:
     def __init__(self):
         self.hours_manager = trading_hours
         self.last_session = None
         
     def should_process_signal(self, asset: str, setup: Dict) -> Tuple[bool, str]:
-        """
-        Check if signal should be processed based on time
-        Returns: (should_process, reason)
-        """
-        
         is_good_time, time_info = self.hours_manager.is_best_time(asset)
         
-        # Always log current session
         current_session = time_info.get('session', 'Unknown')
         if current_session != self.last_session:
-            logger.info(f"🕐 Current session: {current_session} ({time_info.get('quality')})")
+            logger.info(f"Current session: {current_session} ({time_info.get('quality')})")
             self.last_session = current_session
         
-        # EXCELLENT time - process all qualified signals
         if time_info.get('quality') == 'excellent':
             return True, f"Excellent time: {current_session}"
         
-        # MODERATE time - only high confidence signals
         if time_info.get('quality') == 'moderate':
             score = setup.get('confidence', 0)
             if score >= 90:
@@ -42,47 +88,18 @@ class TimeFilter:
             else:
                 return False, f"Moderate time, score {score} < 90 threshold"
         
-        # AVOID time - skip unless exceptional
-        if time_info.get('quality') == 'avoid':
-            score = setup.get('confidence', 0)
-            if score >= 95:  # Only 95+ scores during avoid times
-                return True, f"Avoid time but exceptional score: {score}"
-            else:
-                return False, f"Avoid time: {time_info.get('reason', 'Low quality hours')}"
-        
-        # Default: moderate processing
         return True, "Regular hours"
     
     def get_trading_recommendation(self) -> str:
-        """Get current trading recommendation"""
-        
         is_good, info = self.hours_manager.is_best_time()
         
         if not is_good:
-            next_best = info.get('next_best', 'Unknown')
-            return f"⏸️ AVOID TRADING\nReason: {info.get('reason')}\nNext best: {next_best}"
+            return f"AVOID TRADING\nReason: {info.get('reason')}"
         
         quality = info.get('quality', 'unknown')
         session = info.get('session', 'Unknown')
         
         if quality == 'excellent':
-            return f"✅ EXCELLENT TIME\nSession: {session}\nExpected move: {info.get('expected_move', '1-2%')}"
+            return f"EXCELLENT TIME\nSession: {session}"
         
-        return f"⚠️ MODERATE TIME\nSession: {session}\nBe selective with signals"
-    
-    def get_sleep_time(self) -> int:
-        """Get recommended sleep time until next check"""
-        return self.hours_manager.get_sleep_duration()
-    
-    def format_schedule(self) -> str:
-        """Format daily schedule for display"""
-        schedule = self.hours_manager.get_daily_schedule()
-        
-        lines = ["📅 DAILY TRADING SCHEDULE (IST)\n"]
-        
-        for item in schedule:
-            lines.append(f"{item['time']} | {item['quality']}")
-            lines.append(f"   {item['name']} | Assets: {item['assets']}")
-            lines.append(f"   Expected: {item['expected']}\n")
-        
-        return "\n".join(lines)
+        return f"MODERATE TIME\nSession: {session}"
