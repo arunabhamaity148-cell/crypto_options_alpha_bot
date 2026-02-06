@@ -2,11 +2,8 @@
 builder = "nixpacks"
 
 [deploy]
-startCommand = "sh start.sh"
-restartPolicyType = "always"
+startCommand = "python main.py"
 healthcheckPath = "/health"
-healthcheckTimeout = 30
-healthcheckInterval = 15
-
-[deploy.env]
-PYTHONUNBUFFERED = "1"
+healthcheckTimeout = 100
+restartPolicyType = "on_failure"
+restartPolicyMaxRetries = 10
