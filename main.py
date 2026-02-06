@@ -1,6 +1,6 @@
 """
 Crypto Options Alpha Bot - Main Entry Point
-Fixed: datetime.utcnow() -> datetime.now(timezone.utc)
+Features: WebSocket, Trade Monitor, Structured Logging
 """
 
 import os
@@ -9,7 +9,7 @@ import asyncio
 import logging
 import json
 import random
-from datetime import datetime, timezone, timedelta  # FIXED: Added timezone
+from datetime import datetime, timezone, timedelta
 from typing import Dict, List, Optional
 from dataclasses import dataclass, field
 from threading import Thread
@@ -38,7 +38,6 @@ from tg_bot.bot import AlphaTelegramBot
 class JSONFormatter(logging.Formatter):
     """JSON formatter for structured logging"""
     def format(self, record):
-        # FIXED: Use timezone-aware datetime
         log_obj = {
             'timestamp': datetime.now(timezone.utc).isoformat(),
             'level': record.levelname,
@@ -78,7 +77,6 @@ flask_app = Flask(__name__)
 
 @flask_app.route('/')
 def home():
-    # FIXED: Use timezone-aware datetime
     return {
         'status': 'running',
         'bot': 'Crypto Options Alpha Bot',
@@ -90,13 +88,17 @@ def home():
 @flask_app.route('/health')
 def health():
     """Health check with detailed status"""
-    ws_status = 'connected' if ws_manager.is_connected() else 'disconnected'
-    active_trades = len(getattr(flask_app, 'trade_monitor', {}).active_trades or [])
+    ws_stats = ws_manager.get_stats()
+    monitor = getattr(flask_app, 'trade_monitor', None)
+    active_trades = len(monitor.active_trades) if monitor else 0
     
     return {
         'status': 'healthy',
         'timestamp': datetime.now(timezone.utc).isoformat(),
-        'websocket': ws_status,
+        'websocket': {
+            'connected': ws_stats['connected'],
+            'symbols_tracked': ws_stats['symbols_tracked']
+        },
         'active_trades': active_trades,
         'cycle': getattr(flask_app, 'cycle_count', 0)
     }, 200
@@ -104,13 +106,13 @@ def health():
 @flask_app.route('/api/status')
 def api_status():
     """Detailed API status"""
+    ws_stats = ws_manager.get_stats()
     return {
         'status': 'running',
         'version': '2.0',
         'timestamp': datetime.now(timezone.utc).isoformat(),
         'assets': list(ASSETS_CONFIG.keys()),
-        'websocket_connected': ws_manager.is_connected(),
-        'websocket_symbols': list(ws_manager.price_data.keys()),
+        'websocket': ws_stats,
         'config': {
             'min_score': TRADING_CONFIG['min_score_threshold'],
             'max_signals_per_day': TRADING_CONFIG['max_signals_per_day']
@@ -173,9 +175,13 @@ class AlphaBot:
         
         # Check WebSocket status
         if ws_manager.is_connected():
-            logger.info("✅ WebSocket connected successfully")
+            ws_stats = ws_manager.get_stats()
+            logger.info("WebSocket connected", extra={
+                'event': 'websocket_connected',
+                'symbols': ws_stats['symbols_tracked']
+            })
         else:
-            logger.warning("⚠️ WebSocket not connected, will retry...")
+            logger.warning("WebSocket not connected, will retry...")
         
         # Start Trade Monitor
         monitor_task = asyncio.create_task(
@@ -212,6 +218,16 @@ class AlphaBot:
                     'event': 'cycle_start',
                     'cycle': self.cycle_count
                 })
+                
+                # Log WebSocket stats every 5 cycles
+                if self.cycle_count % 5 == 0:
+                    ws_stats = ws_manager.get_stats()
+                    logger.info(f"WebSocket stats", extra={
+                        'event': 'websocket_stats',
+                        'connected': ws_stats['connected'],
+                        'symbols': ws_stats['symbols_tracked'],
+                        'trades': ws_stats['total_trades']
+                    })
                 
                 # Check daily reset
                 if self.asset_manager.should_reset_daily():
@@ -460,7 +476,6 @@ class AlphaBot:
                     confidence=setup['confidence'],
                     score_breakdown=score['component_scores'],
                     rationale=setup['rationale'],
-                    # FIXED: Use timezone-aware datetime
                     timestamp=datetime.now(timezone.utc)
                 )
                 trading_signals.append(signal)
@@ -494,7 +509,6 @@ class AlphaBot:
                     tp1=signal.target_1,
                     tp2=signal.target_2,
                     strike=signal.strike_selection,
-                    # FIXED: Use timezone-aware datetime
                     expiry=datetime.now(timezone.utc) + timedelta(hours=48),
                     position_size=self.asset_manager.calculate_position_size(
                         signal.asset, signal.entry_price, signal.stop_loss
