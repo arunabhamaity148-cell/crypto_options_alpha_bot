@@ -1,6 +1,6 @@
 """
 WebSocket Manager - Real-time Data
-Fixed: Binance WebSocket URL and stream format
+Fixed: Proper message format handling
 """
 
 import asyncio
@@ -13,7 +13,6 @@ from datetime import datetime, timezone
 logger = logging.getLogger(__name__)
 
 class WebSocketManager:
-    # FIXED: Correct Binance WebSocket URL
     BINANCE_WS_URL = "wss://stream.binance.com:9443/ws"
     BINANCE_STREAM_URL = "wss://stream.binance.com:9443/stream?streams="
     
@@ -29,12 +28,11 @@ class WebSocketManager:
         """Start WebSocket for all assets"""
         self.running = True
         
-        # Build stream names
+        # Build stream names - lowercase symbol
         streams = []
         for asset, config in assets_config.items():
             if config.get('enable', True):
                 symbol = config['symbol'].lower()
-                # FIXED: Correct stream format
                 streams.append(f"{symbol}@trade")
                 streams.append(f"{symbol}@depth20@100ms")
         
@@ -42,7 +40,7 @@ class WebSocketManager:
             logger.warning("No WebSocket streams configured")
             return
         
-        # FIXED: Use correct combined stream URL format
+        # Build URL
         if len(streams) == 1:
             url = f"{self.BINANCE_WS_URL}/{streams[0]}"
         else:
@@ -50,7 +48,7 @@ class WebSocketManager:
             url = f"{self.BINANCE_STREAM_URL}{streams_param}"
         
         logger.info(f"🔌 Connecting WebSocket: {len(streams)} streams")
-        logger.info(f"URL: {url[:80]}...")
+        logger.info(f"URL: {url[:100]}")
         
         while self.running:
             try:
@@ -67,16 +65,15 @@ class WebSocketManager:
                         if not self.running:
                             break
                         try:
-                            await self._handle_message(json.loads(message))
+                            data = json.loads(message)
+                            await self._handle_message(data)
                         except json.JSONDecodeError as e:
                             logger.error(f"JSON decode error: {e}")
                         except Exception as e:
                             logger.error(f"Message handling error: {e}")
                         
             except websockets.exceptions.InvalidStatusCode as e:
-                logger.error(f"❌ WebSocket connection rejected: HTTP {e.status_code}")
-                logger.error(f"URL attempted: {url[:60]}...")
-                # Don't retry immediately on 404, wait longer
+                logger.error(f"❌ WebSocket HTTP {e.status_code}")
                 await asyncio.sleep(30)
                 
             except Exception as e:
@@ -92,8 +89,6 @@ class WebSocketManager:
             if 'stream' in data and 'data' in data:
                 stream = data['stream']
                 payload = data['data']
-                
-                # Extract symbol from stream name (e.g., "btcusdt@trade" -> "BTCUSDT")
                 symbol = stream.split('@')[0].upper()
                 
                 if 'trade' in stream:
@@ -101,56 +96,69 @@ class WebSocketManager:
                 elif 'depth' in stream:
                     await self._handle_orderbook(symbol, payload)
                     
-            # Single stream format: direct data
-            elif 'e' in data:
-                event_type = data.get('e')
+            # Single stream format: direct trade data
+            elif data.get('e') == 'trade':
                 symbol = data.get('s', '').upper()
-                
-                if event_type == 'trade':
+                if symbol:
                     await self._handle_trade_single(data)
-                elif event_type == 'depthUpdate':
+                    
+            # Single stream format: depth update
+            elif data.get('e') == 'depthUpdate':
+                symbol = data.get('s', '').upper()
+                if symbol:
                     await self._handle_orderbook_single(data)
                     
         except Exception as e:
-            logger.error(f"Message processing error: {e}")
+            logger.error(f"Message processing error: {e}, data: {str(data)[:200]}")
     
     async def _handle_trade(self, symbol: str, data: Dict):
         """Process trade from combined stream"""
-        if symbol not in self.price_data:
-            self.price_data[symbol] = {
-                'trades': [], 
-                'last_price': 0, 
-                'volume': 0,
-                'last_trade_time': 0
+        try:
+            if symbol not in self.price_data:
+                self.price_data[symbol] = {
+                    'trades': [], 
+                    'last_price': 0, 
+                    'volume': 0,
+                    'last_trade_time': 0
+                }
+            
+            trade = {
+                'price': float(data.get('p', 0)),
+                'qty': float(data.get('q', 0)),
+                'time': data.get('T', 0),
+                'is_buyer_maker': data.get('m', False),
+                'asset': symbol.replace('USDT', ''),
+                'id': data.get('t', 0)
             }
-        
-        trade = {
-            'price': float(data.get('p', 0)),
-            'qty': float(data.get('q', 0)),
-            'time': data.get('T', 0),
-            'is_buyer_maker': data.get('m', False),
-            'asset': symbol.replace('USDT', ''),
-            'id': data.get('t', 0)
-        }
-        
-        self.price_data[symbol]['trades'].append(trade)
-        self.price_data[symbol]['last_price'] = trade['price']
-        self.price_data[symbol]['last_trade_time'] = trade['time']
-        
-        # Keep last 100 trades
-        if len(self.price_data[symbol]['trades']) > 100:
-            self.price_data[symbol]['trades'] = self.price_data[symbol]['trades'][-100:]
-        
-        # Trigger callbacks
-        if symbol in self.callbacks:
-            try:
-                await self.callbacks[symbol]('trade', trade)
-            except Exception as e:
-                logger.error(f"Callback error: {e}")
+            
+            # Initialize trades list if not exists
+            if 'trades' not in self.price_data[symbol]:
+                self.price_data[symbol]['trades'] = []
+            
+            self.price_data[symbol]['trades'].append(trade)
+            self.price_data[symbol]['last_price'] = trade['price']
+            self.price_data[symbol]['last_trade_time'] = trade['time']
+            
+            # Keep last 100 trades
+            if len(self.price_data[symbol]['trades']) > 100:
+                self.price_data[symbol]['trades'] = self.price_data[symbol]['trades'][-100:]
+            
+            # Trigger callbacks
+            if symbol in self.callbacks:
+                try:
+                    await self.callbacks[symbol]('trade', trade)
+                except Exception as e:
+                    logger.error(f"Callback error: {e}")
+                    
+        except Exception as e:
+            logger.error(f"Trade handling error: {e}, data: {data}")
     
     async def _handle_trade_single(self, data: Dict):
         """Process trade from single stream"""
         symbol = data.get('s', '').upper()
+        if not symbol:
+            return
+            
         await self._handle_trade(symbol, {
             'p': data.get('p'),
             'q': data.get('q'),
@@ -161,12 +169,16 @@ class WebSocketManager:
     
     async def _handle_orderbook(self, symbol: str, data: Dict):
         """Process orderbook from combined stream"""
-        if symbol not in self.price_data:
-            self.price_data[symbol] = {}
-        
         try:
-            bids = [[float(b[0]), float(b[1])] for b in data.get('bids', [])[:20]]
-            asks = [[float(a[0]), float(a[1])] for a in data.get('asks', [])[:20]]
+            if symbol not in self.price_data:
+                self.price_data[symbol] = {}
+            
+            # Parse bids and asks
+            raw_bids = data.get('bids', [])
+            raw_asks = data.get('asks', [])
+            
+            bids = [[float(b[0]), float(b[1])] for b in raw_bids[:20] if len(b) >= 2]
+            asks = [[float(a[0]), float(a[1])] for a in raw_asks[:20] if len(a) >= 2]
             
             self.price_data[symbol]['orderbook'] = {
                 'bids': bids,
@@ -175,6 +187,11 @@ class WebSocketManager:
                 'timestamp': data.get('E', int(datetime.now(timezone.utc).timestamp() * 1000))
             }
             
+            # Calculate mid price
+            if bids and asks:
+                self.price_data[symbol]['last_price'] = (bids[0][0] + asks[0][0]) / 2
+            
+            # Trigger callbacks
             if symbol in self.callbacks:
                 try:
                     await self.callbacks[symbol]('orderbook', self.price_data[symbol]['orderbook'])
@@ -182,14 +199,21 @@ class WebSocketManager:
                     logger.error(f"Callback error: {e}")
                     
         except Exception as e:
-            logger.error(f"Orderbook processing error: {e}")
+            logger.error(f"Orderbook handling error: {e}, data: {data}")
     
     async def _handle_orderbook_single(self, data: Dict):
         """Process orderbook from single stream"""
         symbol = data.get('s', '').upper()
+        if not symbol:
+            return
+            
+        # Convert depthUpdate format to standard format
+        bids = [[float(b[0]), float(b[1])] for b in data.get('b', [])]
+        asks = [[float(a[0]), float(a[1])] for a in data.get('a', [])]
+        
         await self._handle_orderbook(symbol, {
-            'bids': data.get('b', []),
-            'asks': data.get('a', []),
+            'bids': bids,
+            'asks': asks,
             'lastUpdateId': data.get('u', 0),
             'E': data.get('E', 0)
         })
@@ -216,7 +240,19 @@ class WebSocketManager:
     
     def is_connected(self) -> bool:
         """Check WebSocket connection status"""
-        return self.connected
+        return self.connected and self.running
+    
+    def get_stats(self) -> Dict:
+        """Get WebSocket statistics"""
+        return {
+            'connected': self.connected,
+            'symbols_tracked': len(self.price_data),
+            'total_trades': sum(
+                len(d.get('trades', [])) 
+                for d in self.price_data.values()
+            ),
+            'symbols': list(self.price_data.keys())
+        }
     
     def stop(self):
         """Stop WebSocket"""
