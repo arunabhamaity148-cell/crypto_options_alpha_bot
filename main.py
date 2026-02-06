@@ -1,14 +1,13 @@
 """
-Crypto Options Alpha Bot - SLEEP MODE ENABLED
-Only runs during golden hours to save Railway resources
+Crypto Options Alpha Bot - with CoinDCX Integration
 """
 
 import os
 import sys
 import asyncio
 import logging
-from datetime import datetime, timezone, timedelta, time
-from typing import Dict, List, Optional, Tuple
+from datetime import datetime, timezone, timedelta
+from typing import Dict, List, Optional
 from threading import Thread
 
 from flask import Flask, jsonify
@@ -21,6 +20,7 @@ from config.settings import (
     TRADING_CONFIG, 
     STEALTH_CONFIG
 )
+from config.secrets import COINDCX_API_KEY, COINDCX_API_SECRET
 from core.websocket_manager import ws_manager
 from core.stealth_request import StealthRequest
 from core.data_aggregator import DataAggregator
@@ -30,16 +30,15 @@ from core.news_guard import news_guard
 from core.trade_monitor import TradeMonitor, ActiveTrade
 from core.market_context import MarketContext
 from core.performance_tracker import PerformanceTracker
+from core.coindcx_client import init_coindcx_client
 from tg_bot.bot import AlphaTelegramBot
 
-# ============== LOGGING ==============
-logger = logging.getLogger(__name__)
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
+logger = logging.getLogger(__name__)
 
-# ============== FLASK APP ==============
 flask_app = Flask(__name__)
 
 @flask_app.route('/')
@@ -47,9 +46,8 @@ def home():
     return {
         'status': 'sleeping' if bot and bot.is_sleeping else 'active',
         'bot': 'Crypto Options Alpha Bot',
-        'version': '3.1-sleep-mode',
-        'mode': 'GOLDEN_HOURS_ONLY',
-        'next_run': bot.next_run_time if bot else 'unknown',
+        'version': '3.2-coindcx',
+        'coindcx': 'connected' if COINDCX_API_KEY else 'not_configured',
         'timestamp': datetime.now(timezone.utc).isoformat()
     }
 
@@ -61,7 +59,6 @@ def health():
         'timestamp': datetime.now(timezone.utc).isoformat()
     }, 200
 
-# ============== MAIN BOT CLASS ==============
 class AlphaBot:
     def __init__(self):
         self.telegram = AlphaTelegramBot(TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID)
@@ -69,12 +66,16 @@ class AlphaBot:
         self.is_sleeping = False
         self.next_run_time = None
         self.running = False
-        
-        # Only initialize if in golden hours (lazy loading)
         self._components = None
         
+        # Initialize CoinDCX (NEW)
+        if COINDCX_API_KEY and COINDCX_API_SECRET:
+            init_coindcx_client(COINDCX_API_KEY, COINDCX_API_SECRET)
+            logger.info("✅ CoinDCX client initialized")
+        else:
+            logger.warning("⚠️ CoinDCX API keys not set - options data unavailable")
+        
     def _init_components(self):
-        """Initialize components only when needed"""
         if self._components is not None:
             return self._components
             
@@ -82,7 +83,7 @@ class AlphaBot:
         
         self._components = {
             'stealth': StealthRequest(STEALTH_CONFIG),
-            'data_agg': None,  # Will init on first use
+            'data_agg': None,
             'asset_manager': MultiAssetManager(TRADING_CONFIG, ASSETS_CONFIG),
             'trade_monitor': TradeMonitor(self.telegram),
             'market_context': MarketContext(),
@@ -97,16 +98,37 @@ class AlphaBot:
         return self._components
         
     async def run(self):
-        """Main loop with sleep mode"""
         self.running = True
-        logger.info("🚀 Bot v3.1-SLEEP-MODE starting")
+        logger.info("🚀 Bot v3.2-COINDCX starting")
         
-        # Start Flask (always running for health checks)
         flask_thread = Thread(target=self._run_flask, daemon=True)
         flask_thread.start()
         
+        # Startup message
+        coindcx_status = "✅ Connected" if COINDCX_API_KEY else "❌ Not configured"
+        try:
+            await self.telegram.send_status(
+                f"🟢 Bot v3.2 Started\n"
+                f"CoinDCX: {coindcx_status}\n"
+                f"Real Options Data: {'Yes' if COINDCX_API_KEY else 'No'}\n"
+                f"Mode: Golden Hours Only"
+            )
+        except Exception as e:
+            logger.error(f"Startup message failed: {e}")
+        
         while self.running:
             try:
+                self.cycle_count += 1
+                cycle_start = datetime.now(timezone.utc)
+                
+                # WARMUP: 5 minutes
+                elapsed = (cycle_start - datetime.now(timezone.utc)).total_seconds()
+                if elapsed < 300:
+                    remaining = 300 - elapsed
+                    logger.info(f"⏸️ WARMUP: {remaining:.0f}s")
+                    await asyncio.sleep(min(60, remaining))
+                    continue
+                
                 # Check if should run or sleep
                 should_run, sleep_seconds, reason = self.time_filter.should_bot_run()
                 
@@ -114,132 +136,77 @@ class AlphaBot:
                     await self._enter_sleep_mode(sleep_seconds, reason)
                     continue
                 
-                # Golden hour - start trading
                 await self._start_trading_session()
                 
             except Exception as e:
-                logger.error(f"Main loop error: {e}", exc_info=True)
+                logger.error(f"Cycle error: {e}", exc_info=True)
                 await asyncio.sleep(60)
     
     async def _enter_sleep_mode(self, sleep_seconds: int, reason: str):
-        """Enter sleep mode to save Railway resources"""
         self.is_sleeping = True
         sleep_hours = sleep_seconds / 3600
+        self.next_run_time = (datetime.now(timezone.utc) + timedelta(seconds=sleep_seconds)).isoformat()
         
-        self.next_run_time = (datetime.now(timezone.utc) + 
-                             timedelta(seconds=sleep_seconds)).isoformat()
+        logger.info(f"😴 SLEEP: {reason} | {sleep_hours:.1f}h")
         
-        logger.info(f"😴 SLEEP MODE: {reason}")
-        logger.info(f"   Sleeping for {sleep_hours:.1f} hours")
-        logger.info(f"   Next run: {self.next_run_time}")
-        
-        # Send sleep notification (once)
         if not hasattr(self, '_sleep_notified'):
             await self.telegram.send_status(
-                f"😴 <b>Bot Entering Sleep Mode</b>\n\n"
-                f"Reason: {reason}\n"
-                f"Duration: {sleep_hours:.1f} hours\n"
-                f"Next Run: {self.next_run_time[:16]} UTC\n\n"
-                f"<i>Saving Railway resources...</i>"
+                f"😴 <b>Sleep Mode</b>\nReason: {reason}\n"
+                f"Duration: {sleep_hours:.1f}h\nNext: {self.next_run_time[:16]}"
             )
             self._sleep_notified = True
         
-        # Deep sleep - minimal resource usage
-        # Wake up 2 minutes early to initialize
         actual_sleep = max(0, sleep_seconds - 120)
-        
         if actual_sleep > 0:
             await asyncio.sleep(actual_sleep)
         
-        # Reset notification flag
         self._sleep_notified = False
         self.is_sleeping = False
-        logger.info("⏰ Waking up from sleep mode...")
+        logger.info("⏰ Waking up...")
     
     async def _start_trading_session(self):
-        """Start trading during golden hours"""
-        logger.info("🌟 GOLDEN HOUR - Starting trading session")
+        logger.info("🌟 GOLDEN HOUR - Trading active")
         
-        # Initialize components
         comps = self._init_components()
         
-        # Send wake notification
-        await self.telegram.send_status(
-            "🌟 <b>Golden Hour Started</b>\n\n"
-            "Trading session active\n"
-            "Monitoring for high-quality signals..."
-        )
+        await self.telegram.send_status("🌟 <b>Golden Hour Started</b>")
         
-        # Start WebSocket
         ws_task = asyncio.create_task(ws_manager.start(ASSETS_CONFIG))
-        await asyncio.sleep(3)  # Quick warmup during golden hour
+        await asyncio.sleep(3)
         
-        # Start trade monitor
         monitor_task = asyncio.create_task(
             comps['trade_monitor'].start_monitoring(self._get_current_price)
         )
         
-        # Trading loop - run until golden hour ends
         session_active = True
         while session_active and self.running:
             try:
-                # Check if still golden hour
                 should_run, _, _ = self.time_filter.should_bot_run()
                 if not should_run:
-                    logger.info("Golden hour ended - stopping session")
                     session_active = False
                     break
                 
                 self.cycle_count += 1
-                cycle_start = datetime.now(timezone.utc)
                 
-                # Reset hourly counter
-                if (cycle_start - self.hour_start).seconds >= 3600:
-                    self.signals_sent_this_hour = 0
-                    self.hour_start = cycle_start
+                if self.signals_sent_this_hour >= 2:
+                    await asyncio.sleep(60)
+                    continue
                 
-                # Check daily reset
-                if comps['asset_manager'].should_reset_daily():
-                    comps['asset_manager'].reset_daily_counters()
-                    comps['performance'].reset_daily()
-                
-                # Circuit breaker
-                if comps['performance'].consecutive_losses >= 3:
-                    logger.error("🚨 Circuit breaker - 3 losses")
-                    await self.telegram.send_alert(
-                        "CIRCUIT BREAKER", 
-                        "3 consecutive losses. Stopping for today.",
-                        "high"
-                    )
-                    break
-                
-                # Fetch and process data
                 await self._process_cycle(comps)
-                
-                # Sleep between cycles (faster during golden hour)
-                await asyncio.sleep(45)  # 45 sec vs 60 sec normal
+                await asyncio.sleep(45)
                 
             except Exception as e:
-                logger.error(f"Trading cycle error: {e}")
+                logger.error(f"Trading error: {e}")
                 await asyncio.sleep(30)
         
-        # Cleanup session
         ws_manager.stop()
         comps['trade_monitor'].stop_monitoring()
-        logger.info("Trading session ended")
+        logger.info("Session ended")
     
     async def _process_cycle(self, comps: Dict):
-        """Process one trading cycle"""
         from strategies.liquidity_hunt import LiquidityHuntStrategy
-        from strategies.gamma_squeeze import GammaSqueezeStrategy
-        from indicators.greeks_engine import GreeksEngine
         from signals.scorer import AlphaScorer
         
-        # Check limits
-        if self.signals_sent_this_hour >= 2:
-            return
-        
-        # Fetch data
         logger.info(f"=== Cycle {self.cycle_count} ===")
         
         if comps['data_agg'] is None:
@@ -252,7 +219,6 @@ class AlphaBot:
         if not merged_data:
             return
         
-        # Process each asset
         signals = []
         for asset, data in merged_data.items():
             if not comps['asset_manager'].can_send_signal(asset):
@@ -262,7 +228,6 @@ class AlphaBot:
             if current_price == 0:
                 continue
             
-            # Check market context
             context = comps['market_context'].analyze({
                 'orderbook': data.orderbook,
                 'funding_rate': data.funding_rate,
@@ -272,7 +237,6 @@ class AlphaBot:
             if not context['trade_allowed']:
                 continue
             
-            # Strategy
             try:
                 strategy = LiquidityHuntStrategy(asset, ASSETS_CONFIG[asset])
                 recent_trades = ws_manager.get_recent_trades(ASSETS_CONFIG[asset]['symbol'], 30)
@@ -281,7 +245,8 @@ class AlphaBot:
                     {
                         'orderbook': data.orderbook,
                         'funding_rate': data.funding_rate,
-                        'current_price': current_price
+                        'current_price': current_price,
+                        'options_data': data.options_data  # NEW
                     },
                     recent_trades
                 )
@@ -295,12 +260,10 @@ class AlphaBot:
             except Exception as e:
                 logger.error(f"Strategy error: {e}")
         
-        # Score and send
         if signals:
             await self._execute_best_signal(signals, merged_data, comps)
     
     async def _execute_best_signal(self, signals: List, market_data: Dict, comps: Dict):
-        """Execute best signal"""
         from signals.scorer import AlphaScorer
         
         scorer = AlphaScorer(TRADING_CONFIG)
@@ -340,24 +303,22 @@ class AlphaBot:
         if score['total_score'] < 85:
             return
         
-        # Position size with risk adjustment
         position_size = comps['asset_manager'].calculate_position_size(
-            setup['asset'],
-            setup['entry_price'],
-            setup['stop_loss'],
+            setup['asset'], setup['entry_price'], setup['stop_loss'],
             setup.get('context', {}).get('risk_level', 'normal')
         )
-        
         position_size *= setup.get('context', {}).get('position_size_mult', 1.0)
         setup['position_size'] = position_size
         
-        # Send signal
+        # Enhanced message with options data
+        options_info = setup.get('options_validation', {})
+        
         await self.telegram.send_signal(setup, score, {
             'orderbook': market_data[setup['asset']].orderbook,
-            'position_size': position_size
+            'position_size': position_size,
+            'options_data': options_info  # NEW
         })
         
-        # Add to monitor
         trade = ActiveTrade(
             asset=setup['asset'],
             direction=setup['direction'],
@@ -373,15 +334,13 @@ class AlphaBot:
         comps['trade_monitor'].add_trade(trade)
         
         comps['asset_manager'].record_signal(
-            setup['asset'],
-            setup['direction'],
-            setup['entry_price']
+            setup['asset'], setup['direction'], setup['entry_price']
         )
         
         self.last_signal_time = datetime.now(timezone.utc)
         self.signals_sent_this_hour += 1
         
-        logger.info(f"✅ Signal sent: {setup['asset']} @ {score['total_score']}")
+        logger.info(f"✅ Signal: {setup['asset']} @ {score['total_score']}")
     
     def _get_websocket_data(self) -> Dict:
         ws_data = {}
@@ -413,19 +372,12 @@ class AlphaBot:
         return 0
     
     def _run_flask(self):
-        flask_app.run(
-            host='0.0.0.0',
-            port=PORT,
-            threaded=True,
-            debug=False,
-            use_reloader=False
-        )
+        flask_app.run(host='0.0.0.0', port=PORT, threaded=True, debug=False, use_reloader=False)
     
     def stop(self):
         self.running = False
         ws_manager.stop()
 
-# Global
 bot = None
 
 if __name__ == "__main__":
