@@ -1,5 +1,5 @@
 """
-Multi-Exchange Data Aggregation for BTC, ETH, SOL
+Multi-Exchange Data Aggregation
 """
 
 import asyncio
@@ -22,14 +22,10 @@ class AssetData:
     timestamp: datetime
 
 class DataAggregator:
-    """Aggregates data from Binance for all assets"""
-    
     def __init__(self, stealth_request):
         self.stealth = stealth_request
         
     async def get_all_assets_data(self, assets_config: Dict) -> Dict[str, AssetData]:
-        """Fetch data for all assets concurrently"""
-        
         tasks = []
         for asset, config in assets_config.items():
             if config.get('enable', True):
@@ -47,11 +43,8 @@ class DataAggregator:
         return data
     
     async def _fetch_asset_data(self, asset: str, config: Dict) -> AssetData:
-        """Fetch comprehensive data for single asset"""
-        
         symbol = config['symbol']
         
-        # Fetch all components concurrently
         tasks = [
             self._get_spot_price(symbol),
             self._get_perp_price(symbol),
@@ -63,7 +56,6 @@ class DataAggregator:
         
         results = await asyncio.gather(*tasks, return_exceptions=True)
         
-        # Extract results (handle exceptions)
         spot = results[0] if not isinstance(results[0], Exception) else 0
         perp = results[1] if not isinstance(results[1], Exception) else 0
         funding = results[2] if not isinstance(results[2], Exception) else 0
@@ -83,7 +75,6 @@ class DataAggregator:
         )
     
     async def _get_spot_price(self, symbol: str) -> float:
-        """Get spot price"""
         data = await self.stealth.get(
             'https://api.binance.com/api/v3/ticker/price',
             {'symbol': symbol}
@@ -91,7 +82,6 @@ class DataAggregator:
         return float(data.get('price', 0))
     
     async def _get_perp_price(self, symbol: str) -> float:
-        """Get perpetual price"""
         data = await self.stealth.get(
             'https://fapi.binance.com/fapi/v1/ticker/price',
             {'symbol': symbol}
@@ -99,7 +89,6 @@ class DataAggregator:
         return float(data.get('price', 0))
     
     async def _get_funding_rate(self, symbol: str) -> float:
-        """Get funding rate"""
         data = await self.stealth.get(
             'https://fapi.binance.com/fapi/v1/fundingRate',
             {'symbol': symbol, 'limit': 1}
@@ -109,7 +98,6 @@ class DataAggregator:
         return 0
     
     async def _get_open_interest(self, symbol: str) -> float:
-        """Get open interest"""
         data = await self.stealth.get(
             'https://fapi.binance.com/fapi/v1/openInterest',
             {'symbol': symbol}
@@ -117,7 +105,6 @@ class DataAggregator:
         return float(data.get('openInterest', 0))
     
     async def _get_24h_volume(self, symbol: str) -> float:
-        """Get 24h volume"""
         data = await self.stealth.get(
             'https://api.binance.com/api/v3/ticker/24hr',
             {'symbol': symbol}
@@ -125,7 +112,6 @@ class DataAggregator:
         return float(data.get('volume', 0)) * float(data.get('weightedAvgPrice', 0))
     
     async def _get_orderbook(self, symbol: str, limit: int = 100) -> Dict:
-        """Get orderbook with analysis"""
         data = await self.stealth.get(
             'https://api.binance.com/api/v3/depth',
             {'symbol': symbol, 'limit': limit}
@@ -140,34 +126,18 @@ class DataAggregator:
         if not bids or not asks:
             return {}
         
-        # Calculate metrics
         best_bid = bids[0][0]
         best_ask = asks[0][0]
         mid_price = (best_bid + best_ask) / 2
         
-        # Bid/ask pressure (top 10 levels)
         bid_pressure = sum(b[1] * b[0] for b in bids[:10])
         ask_pressure = sum(a[1] * a[0] for a in asks[:10])
         
-        # Find walls (>5x average size)
         avg_bid = sum(b[1] for b in bids[:20]) / 20
         avg_ask = sum(a[1] for a in asks[:20]) / 20
         
         bid_walls = [(b[0], b[1]) for b in bids[:20] if b[1] > avg_bid * 5]
         ask_walls = [(a[0], a[1]) for a in asks[:20] if a[1] > avg_ask * 5]
-        
-        # Liquidity voids (gaps)
-        bid_gaps = []
-        for i in range(min(20, len(bids)-1)):
-            gap = (bids[i][0] - bids[i+1][0]) / bids[i][0]
-            if gap > 0.002:  # 0.2% gap
-                bid_gaps.append((bids[i+1][0], gap))
-        
-        ask_gaps = []
-        for i in range(min(20, len(asks)-1)):
-            gap = (asks[i+1][0] - asks[i][0]) / asks[i][0]
-            if gap > 0.002:
-                ask_gaps.append((asks[i][0], gap))
         
         return {
             'bids': bids[:20],
@@ -180,14 +150,4 @@ class DataAggregator:
             'ofi_ratio': (bid_pressure - ask_pressure) / (bid_pressure + ask_pressure) if (bid_pressure + ask_pressure) > 0 else 0,
             'bid_walls': bid_walls[:3],
             'ask_walls': ask_walls[:3],
-            'liquidity_voids_below': bid_gaps[:2],
-            'liquidity_voids_above': ask_gaps[:2],
         }
-    
-    async def get_recent_trades(self, symbol: str, limit: int = 100) -> List[Dict]:
-        """Get recent trades for CVD calculation"""
-        data = await self.stealth.get(
-            'https://api.binance.com/api/v3/trades',
-            {'symbol': symbol, 'limit': limit}
-        )
-        return data if isinstance(data, list) else []
