@@ -36,6 +36,14 @@ TRADING_CONFIG = {
     'account_size': 100000,
 }
 
+# Stealth config (REQUIRED for main.py)
+STEALTH_CONFIG = {
+    'enable_jitter': True,
+    'min_request_delay': 0.3,
+    'max_request_delay': 1.2,
+    'max_requests_per_minute': 30
+}
+
 # Golden Hours (IST)
 GOLDEN_HOURS = {
     'enabled': True,
