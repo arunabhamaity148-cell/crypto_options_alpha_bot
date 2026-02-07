@@ -17,7 +17,7 @@ class AlphaScorer:
             'momentum': 0.15,
             'sentiment': 0.05
         }
-        self.consecutive_passes = 0
+        # REMOVED: self.consecutive_passes = 0 (was unused)
     
     def calculate_score(self, setup: Dict, market_data: Dict, 
                        news_status: str = "safe",
@@ -49,10 +49,10 @@ class AlphaScorer:
         if news_status == "extreme_event":
             total *= 0.30
         
-        # HARD CAP at 95 - 100 impossible
+        # HARD CAP at 95 - 100 impossible to prevent overfitting
         total = min(95, max(0, total))
         
-        # FIXED: Proper quality grading
+        # Quality grading
         if total >= 92:
             confidence = 'exceptional'
             recommendation = 'strong_take'
@@ -78,7 +78,7 @@ class AlphaScorer:
             'total_score': round(total, 1),
             'confidence': confidence,
             'recommendation': recommendation,
-            'setup_quality': setup_quality,  # MUST include
+            'setup_quality': setup_quality,
             'component_scores': scores,
             'threshold_used': self.config.get('min_score_threshold', 82),
             'time_multiplier': time_multiplier,
@@ -170,17 +170,20 @@ class AlphaScorer:
         ask_pressure = ob.get('ask_pressure', 0)
         total_pressure = buy_pressure + ask_pressure
         
-        if total_pressure > 0:
-            buy_pct = (buy_pressure / total_pressure) * 100
-            direction = setup.get('direction', 'long')
-            
-            if direction == 'long' and buy_pct > 60:
-                score += 18
-            elif direction == 'long' and buy_pct > 52:
-                score += 10
-            elif direction == 'short' and buy_pct < 40:
-                score += 18
-            elif direction == 'short' and buy_pct < 48:
-                score += 10
+        # FIX: Handle zero total pressure
+        if total_pressure == 0:
+            return 65  # Neutral score
+        
+        buy_pct = (buy_pressure / total_pressure) * 100
+        direction = setup.get('direction', 'long')
+        
+        if direction == 'long' and buy_pct > 60:
+            score += 18
+        elif direction == 'long' and buy_pct > 52:
+            score += 10
+        elif direction == 'short' and buy_pct < 40:
+            score += 18
+        elif direction == 'short' and buy_pct < 48:
+            score += 10
         
         return min(83, score)
