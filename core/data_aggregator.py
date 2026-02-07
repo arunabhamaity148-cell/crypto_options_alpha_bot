@@ -1,12 +1,12 @@
 """
-Data Aggregator with CoinDCX Options Integration
+Data Aggregator with CoinDCX Options Integration - FIXED
 """
 
 import asyncio
 import logging
 from typing import Dict, Optional, List
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
 
 from core.stealth_request import StealthRequest
 from core.coindcx_client import coindcx_client
@@ -34,13 +34,14 @@ class DataAggregator:
         
     def _get_cached(self, key: str, ttl: int = 60):
         if key in self._cache and key in self._cache_time:
-            if datetime.now() - self._cache_time[key] < timedelta(seconds=ttl):
+            # FIX: Use timezone aware comparison
+            if datetime.now(timezone.utc) - self._cache_time[key] < timedelta(seconds=ttl):
                 return self._cache[key]
         return None
     
     def _set_cached(self, key: str, value):
         self._cache[key] = value
-        self._cache_time[key] = datetime.now()
+        self._cache_time[key] = datetime.now(timezone.utc)
         
     async def get_all_assets_data(self, assets_config: Dict) -> Dict[str, AssetData]:
         tasks = []
@@ -48,32 +49,36 @@ class DataAggregator:
             if config.get('enable', True):
                 tasks.append(self._fetch_asset_data(asset, config))
         
+        # FIX: Proper exception handling
         results = await asyncio.gather(*tasks, return_exceptions=True)
         
         data = {}
-        for result in results:
-            if isinstance(result, AssetData):
+        for i, result in enumerate(results):
+            asset = list(assets_config.keys())[i]
+            if isinstance(result, Exception):
+                logger.error(f"Fetch error for {asset}: {result}")
+            elif isinstance(result, AssetData):
                 data[result.asset] = result
-            elif isinstance(result, Exception):
-                logger.error(f"Fetch error: {result}")
         
         return data
     
     async def _fetch_asset_data(self, asset: str, config: Dict) -> AssetData:
         symbol = config['symbol']
         
-        # Parallel fetch
+        # Parallel fetch with individual error handling
+        spot_task = self.get_spot_price(symbol)
+        perp_task = self.get_perp_price(symbol)
+        funding_task = self.get_funding_rate(symbol)
+        oi_task = self.get_open_interest(symbol)
+        volume_task = self.get_24h_volume(symbol)
+        ob_task = self.get_orderbook(symbol)
+        
         spot, perp, funding, oi, volume, ob = await asyncio.gather(
-            self.get_spot_price(symbol),
-            self.get_perp_price(symbol),
-            self.get_funding_rate(symbol),
-            self.get_open_interest(symbol),
-            self.get_24h_volume(symbol),
-            self.get_orderbook(symbol),
+            spot_task, perp_task, funding_task, oi_task, volume_task, ob_task,
             return_exceptions=True
         )
         
-        # Handle exceptions
+        # Handle exceptions individually
         spot = spot if not isinstance(spot, Exception) else 0
         perp = perp if not isinstance(perp, Exception) else 0
         funding = funding if not isinstance(funding, Exception) else 0
@@ -81,7 +86,7 @@ class DataAggregator:
         volume = volume if not isinstance(volume, Exception) else 0
         ob = ob if not isinstance(ob, Exception) else {}
         
-        # Get options data from CoinDCX (NEW)
+        # Get options data from CoinDCX
         options_data = await self.get_options_data(asset, spot)
         
         return AssetData(
@@ -93,8 +98,8 @@ class DataAggregator:
             volume_24h=volume,
             orderbook=ob,
             options_data=options_data,
-            recent_trades=[],
-            timestamp=datetime.now()
+            recent_trades=[],  # FIX: This should be populated from WebSocket
+            timestamp=datetime.now(timezone.utc)
         )
     
     async def get_options_data(self, asset: str, spot_price: float) -> Optional[Dict]:
@@ -132,7 +137,7 @@ class DataAggregator:
                 'call': call_data,
                 'put': put_data,
                 'iv_skew': iv_skew,
-                'timestamp': datetime.now().isoformat()
+                'timestamp': datetime.now(timezone.utc).isoformat()
             }
             
         except Exception as e:
