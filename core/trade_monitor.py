@@ -1,5 +1,6 @@
 """
 Trade Monitor & Auto-Management System - FIXED with Time-Based Exit
+Integrated with Adaptive Optimizer
 """
 
 import asyncio
@@ -10,6 +11,7 @@ from datetime import datetime, timezone, timedelta
 from enum import Enum
 
 from tg_bot.bot import AlphaTelegramBot
+from core.adaptive_optimizer import adaptive_optimizer
 
 logger = logging.getLogger(__name__)
 
@@ -47,8 +49,13 @@ class ActiveTrade:
     tp2_triggered: bool = False
     trail_stop_active: bool = False
     trail_stop_price: float = 0.0
-    time_exit_triggered: bool = False  # NEW: Track time exit
-    max_hold_minutes: int = 60  # NEW: Signal validity time
+    time_exit_triggered: bool = False
+    max_hold_minutes: int = 60
+    
+    # NEW: Fields for optimizer tracking
+    setup_key: str = ""
+    regime: str = "unknown"
+    mtf_score: float = 0.0
 
     def update_price(self, price: float):
         """Update current price and PnL"""
@@ -121,6 +128,7 @@ class TradeMonitor:
             f"SL: {trade.stop_loss:,.2f}\n"
             f"TP1: {trade.tp1:,.2f} | TP2: {trade.tp2:,.2f}\n"
             f"Size: {trade.position_size:.3f}\n"
+            f"Regime: {trade.regime}\n"
             f"Max Hold: {trade.max_hold_minutes} minutes\n\n"
             f"<b>Auto-actions enabled:</b>\n"
             f"• SL → BE at +1%\n"
@@ -173,7 +181,7 @@ class TradeMonitor:
                     # Check all alert conditions
                     await self._check_alerts(trade)
                     
-                    # Check time-based exit (NEW)
+                    # Check time-based exit
                     await self._check_time_exit(trade)
                     
                     # Check if trade hit SL/TP
@@ -193,7 +201,7 @@ class TradeMonitor:
                 await asyncio.sleep(10)
     
     async def _check_time_exit(self, trade: ActiveTrade):
-        """NEW: Check and handle time-based exit"""
+        """Check and handle time-based exit"""
         hold_time = trade.get_hold_time_minutes()
         
         # Warning at 50 minutes (10 min before expiry)
@@ -349,12 +357,34 @@ class TradeMonitor:
             f"Entry: {trade.entry_price:,.2f}\n"
             f"Exit: {trade.current_price:,.2f}\n"
             f"{pnl_emoji} <b>P&L: {trade.pnl_percent:+.2f}%</b>\n"
-            f"Duration: {duration_str}\n\n"
+            f"Duration: {duration_str}\n"
+            f"Regime: {trade.regime}\n\n"
             f"<i>{datetime.now(timezone.utc).strftime('%H:%M:%S')} UTC</i>"
         )
         
         await self.telegram.send_status(message)
         logger.info(f"Trade closed: {trade.asset} | P&L: {trade.pnl_percent:.2f}%")
+        
+        # NEW: Record for adaptive optimizer
+        try:
+            setup = {
+                'asset': trade.asset,
+                'direction': trade.direction,
+                'strategy': 'liquidity_hunt',  # Default, can be enhanced
+                'regime': trade.regime
+            }
+            
+            trade_result = {
+                'pnl_percent': trade.pnl_percent,
+                'exit_reason': reason,
+                'duration_minutes': duration.total_seconds() / 60,
+                'mtf_score': trade.mtf_score
+            }
+            
+            adaptive_optimizer.record_trade(setup, trade_result)
+            logger.info(f"Recorded trade for optimizer: {trade.setup_key}")
+        except Exception as e:
+            logger.error(f"Failed to record trade for optimizer: {e}")
         
         # Record for performance
         if self.performance_callback:
