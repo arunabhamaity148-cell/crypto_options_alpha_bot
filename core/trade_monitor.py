@@ -1,12 +1,12 @@
 """
-Trade Monitor & Auto-Management System
+Trade Monitor & Auto-Management System - FIXED
 """
 
 import asyncio
 import logging
 from typing import Dict, List, Optional, Tuple
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
+from datetime import datetime, timezone, timedelta
 from enum import Enum
 
 from tg_bot.bot import AlphaTelegramBot
@@ -35,7 +35,7 @@ class ActiveTrade:
     strike: str
     expiry: datetime
     position_size: float
-    entry_time: datetime = field(default_factory=datetime.now)
+    entry_time: datetime = field(default_factory=lambda: datetime.now(timezone.utc))  # FIX: Timezone aware
     status: str = "open"
     alerts_sent: List[AlertType] = field(default_factory=list)
     current_price: float = 0.0
@@ -90,14 +90,14 @@ class TradeMonitor:
         self.price_history: Dict[str, List[Tuple[datetime, float]]] = {}
         self.performance_callback = None
         
-    def add_trade(self, trade: ActiveTrade):
-        """Add new trade to monitor"""
+    def add_trade(self, trade: ActiveTrade) -> Optional[asyncio.Task]:
+        """Add new trade to monitor - FIX: Return task for proper handling"""
         self.active_trades.append(trade)
         self.price_history[trade.asset] = []
         logger.info(f"📊 Added trade: {trade.asset} {trade.direction} @ {trade.entry_price}")
         
-        # Send initial confirmation
-        asyncio.create_task(self._send_trade_confirmation(trade))
+        # Return task so caller can await if needed
+        return asyncio.create_task(self._send_trade_confirmation(trade))
     
     async def _send_trade_confirmation(self, trade: ActiveTrade):
         """Send trade entry confirmation"""
@@ -131,12 +131,26 @@ class TradeMonitor:
                     if trade.status != "open":
                         continue
                     
-                    # Fetch current price
-                    current_price = await data_fetcher(trade.asset)
+                    # FIX: Add timeout to prevent hanging
+                    try:
+                        current_price = await asyncio.wait_for(
+                            data_fetcher(trade.asset),
+                            timeout=10.0
+                        )
+                    except asyncio.TimeoutError:
+                        logger.error(f"Price fetch timeout for {trade.asset}")
+                        continue
+                    except Exception as e:
+                        logger.error(f"Price fetch error for {trade.asset}: {e}")
+                        continue
+                    
+                    if current_price == 0:
+                        continue
+                    
                     trade.update_price(current_price)
                     
                     # Store price history
-                    self.price_history[trade.asset].append((datetime.now(), current_price))
+                    self.price_history[trade.asset].append((datetime.now(timezone.utc), current_price))
                     
                     # Keep only last 100 prices
                     if len(self.price_history[trade.asset]) > 100:
@@ -183,7 +197,6 @@ class TradeMonitor:
                 'current_pnl': trade.pnl_percent
             })
             logger.info(f"Auto-partial close triggered for {trade.asset}")
-            # Here you would actually close 50% via API
         
         # 3. Activate trailing stop after TP1
         if trade.tp1_triggered and not trade.trail_stop_active:
@@ -210,8 +223,32 @@ class TradeMonitor:
     
     async def _check_alerts(self, trade: ActiveTrade):
         """Check and send alerts"""
-        # Implementation same as before
-        pass
+        # Check SL approaching
+        if trade.direction == 'long':
+            distance_to_sl = ((trade.current_price - trade.stop_loss) / trade.entry_price) * 100
+        else:
+            distance_to_sl = ((trade.stop_loss - trade.current_price) / trade.entry_price) * 100
+        
+        if distance_to_sl < 0.5 and AlertType.SL_APPROACHING not in trade.alerts_sent:
+            await self._send_alert(trade, AlertType.SL_APPROACHING, {
+                'distance': f"{distance_to_sl:.2f}%",
+                'current': trade.current_price
+            })
+            trade.alerts_sent.append(AlertType.SL_APPROACHING)
+        
+        # Check TP1 approaching
+        if not trade.tp1_triggered:
+            if trade.direction == 'long':
+                distance_to_tp1 = ((trade.tp1 - trade.current_price) / trade.entry_price) * 100
+            else:
+                distance_to_tp1 = ((trade.current_price - trade.tp1) / trade.entry_price) * 100
+            
+            if distance_to_tp1 < 0.3 and AlertType.TP1_APPROACHING not in trade.alerts_sent:
+                await self._send_alert(trade, AlertType.TP1_APPROACHING, {
+                    'distance': f"{distance_to_tp1:.2f}%",
+                    'current': trade.current_price
+                })
+                trade.alerts_sent.append(AlertType.TP1_APPROACHING)
     
     async def _check_trade_status(self, trade: ActiveTrade):
         """Check if SL or TP hit"""
@@ -225,8 +262,8 @@ class TradeMonitor:
                 trade.status = "tp2_hit"
                 await self._close_trade(trade, "TP2 HIT - FULL TARGET", "win")
                 
-            elif trade.current_price >= trade.tp1 and trade.status == "open" and not trade.tp1_triggered:
-                # Wait for auto-manage to handle TP1
+            elif trade.current_price >= trade.tp1 and trade.tp1_triggered:
+                # TP1 already handled by auto-manage, wait for TP2 or trail
                 pass
                 
         else:  # short
@@ -242,7 +279,8 @@ class TradeMonitor:
         """Close trade and notify"""
         emoji = "✅" if result == "win" else "❌"
         
-        duration = datetime.now() - trade.entry_time
+        # FIX: Proper timezone aware duration calculation
+        duration = datetime.now(timezone.utc) - trade.entry_time
         hours, remainder = divmod(duration.seconds, 3600)
         minutes, _ = divmod(remainder, 60)
         duration_str = f"{hours}h {minutes}m"
@@ -255,7 +293,7 @@ class TradeMonitor:
             f"Exit: {trade.current_price:,.2f}\n"
             f"<b>P&L: {trade.pnl_percent:+.2f}%</b>\n"
             f"Duration: {duration_str}\n\n"
-            f"<i>{datetime.now().strftime('%H:%M:%S')} UTC</i>"
+            f"<i>{datetime.now(timezone.utc).strftime('%H:%M:%S')} UTC</i>"
         )
         
         await self.telegram.send_status(message)
