@@ -1,5 +1,5 @@
 """
-Trade Monitor & Auto-Management System - FIXED
+Trade Monitor & Auto-Management System - FIXED with Time-Based Exit
 """
 
 import asyncio
@@ -20,6 +20,7 @@ class AlertType(Enum):
     BREAKEVEN_TRIGGER = "breakeven_trigger"
     TRAIL_STOP_TRIGGER = "trail_stop_trigger"
     TIME_EXPIRING = "time_expiring"
+    TIME_EXPIRED = "time_expired"
     REVERSAL_DETECTED = "reversal_detected"
     VOLATILITY_SPIKE = "volatility_spike"
     PARTIAL_CLOSE = "partial_close"
@@ -35,7 +36,7 @@ class ActiveTrade:
     strike: str
     expiry: datetime
     position_size: float
-    entry_time: datetime = field(default_factory=lambda: datetime.now(timezone.utc))  # FIX: Timezone aware
+    entry_time: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     status: str = "open"
     alerts_sent: List[AlertType] = field(default_factory=list)
     current_price: float = 0.0
@@ -46,6 +47,8 @@ class ActiveTrade:
     tp2_triggered: bool = False
     trail_stop_active: bool = False
     trail_stop_price: float = 0.0
+    time_exit_triggered: bool = False  # NEW: Track time exit
+    max_hold_minutes: int = 60  # NEW: Signal validity time
 
     def update_price(self, price: float):
         """Update current price and PnL"""
@@ -55,6 +58,10 @@ class ActiveTrade:
             self.pnl_percent = ((price - self.entry_price) / self.entry_price) * 100
         else:
             self.pnl_percent = ((self.entry_price - price) / self.entry_price) * 100
+    
+    def get_hold_time_minutes(self) -> float:
+        """Calculate how long trade has been open"""
+        return (datetime.now(timezone.utc) - self.entry_time).total_seconds() / 60
 
 class TradeMonitor:
     """Monitors active trades with auto-management"""
@@ -80,6 +87,12 @@ class TradeMonitor:
             'profit_percent': 2.0,
             'close_percent': 0.5,
             'message': '🔒 Close 50% position at TP1'
+        },
+        AlertType.TIME_EXPIRING: {
+            'message': '⏰ Signal expiring soon - tightening stop'
+        },
+        AlertType.TIME_EXPIRED: {
+            'message': '⏰ Time limit reached - closing position'
         }
     }
     
@@ -91,12 +104,11 @@ class TradeMonitor:
         self.performance_callback = None
         
     def add_trade(self, trade: ActiveTrade) -> Optional[asyncio.Task]:
-        """Add new trade to monitor - FIX: Return task for proper handling"""
+        """Add new trade to monitor"""
         self.active_trades.append(trade)
         self.price_history[trade.asset] = []
         logger.info(f"📊 Added trade: {trade.asset} {trade.direction} @ {trade.entry_price}")
         
-        # Return task so caller can await if needed
         return asyncio.create_task(self._send_trade_confirmation(trade))
     
     async def _send_trade_confirmation(self, trade: ActiveTrade):
@@ -108,11 +120,13 @@ class TradeMonitor:
             f"Entry: {trade.entry_price:,.2f}\n"
             f"SL: {trade.stop_loss:,.2f}\n"
             f"TP1: {trade.tp1:,.2f} | TP2: {trade.tp2:,.2f}\n"
-            f"Size: {trade.position_size:.3f}\n\n"
+            f"Size: {trade.position_size:.3f}\n"
+            f"Max Hold: {trade.max_hold_minutes} minutes\n\n"
             f"<b>Auto-actions enabled:</b>\n"
             f"• SL → BE at +1%\n"
             f"• 50% close at TP1\n"
-            f"• Trail stop after TP1"
+            f"• Trail stop after TP1\n"
+            f"• Auto-close after {trade.max_hold_minutes}min"
         )
         await self.telegram.send_status(message)
     
@@ -131,7 +145,7 @@ class TradeMonitor:
                     if trade.status != "open":
                         continue
                     
-                    # FIX: Add timeout to prevent hanging
+                    # Fetch current price with timeout
                     try:
                         current_price = await asyncio.wait_for(
                             data_fetcher(trade.asset),
@@ -159,6 +173,9 @@ class TradeMonitor:
                     # Check all alert conditions
                     await self._check_alerts(trade)
                     
+                    # Check time-based exit (NEW)
+                    await self._check_time_exit(trade)
+                    
                     # Check if trade hit SL/TP
                     await self._check_trade_status(trade)
                     
@@ -174,6 +191,49 @@ class TradeMonitor:
             except Exception as e:
                 logger.error(f"Monitor error: {e}")
                 await asyncio.sleep(10)
+    
+    async def _check_time_exit(self, trade: ActiveTrade):
+        """NEW: Check and handle time-based exit"""
+        hold_time = trade.get_hold_time_minutes()
+        
+        # Warning at 50 minutes (10 min before expiry)
+        if hold_time > 50 and not trade.time_exit_triggered:
+            if AlertType.TIME_EXPIRING not in trade.alerts_sent:
+                await self._send_alert(trade, AlertType.TIME_EXPIRING, {
+                    'hold_time': f"{hold_time:.0f}m",
+                    'time_remaining': f"{trade.max_hold_minutes - hold_time:.0f}m"
+                })
+                trade.alerts_sent.append(AlertType.TIME_EXPIRING)
+        
+        # Action at 60 minutes
+        if hold_time > trade.max_hold_minutes and not trade.time_exit_triggered:
+            trade.time_exit_triggered = True
+            
+            # If in profit, tighten stop to breakeven + small buffer
+            if trade.pnl_percent > 0.3:
+                if trade.direction == 'long':
+                    new_stop = trade.entry_price * 1.003  # +0.3%
+                else:
+                    new_stop = trade.entry_price * 0.997  # -0.3%
+                
+                trade.stop_loss = new_stop
+                trade.trail_stop_active = True
+                trade.trail_stop_price = new_stop
+                
+                await self._send_alert(trade, AlertType.TIME_EXPIRING, {
+                    'hold_time': f"{hold_time:.0f}m",
+                    'action': 'Tightened stop to +0.3%',
+                    'new_sl': new_stop,
+                    'pnl': f"{trade.pnl_percent:.2f}%"
+                })
+                
+                logger.info(f"Time exit: Tightened stop for {trade.asset} to {new_stop:,.2f}")
+                
+            # If small profit or loss, close immediately
+            else:
+                trade.status = "time_exit"
+                result = "breakeven" if trade.pnl_percent >= 0 else "small_loss"
+                await self._close_trade(trade, "TIME EXPIRED", result)
     
     async def _auto_manage(self, trade: ActiveTrade):
         """Auto-manage trade based on profit levels"""
@@ -262,10 +322,6 @@ class TradeMonitor:
                 trade.status = "tp2_hit"
                 await self._close_trade(trade, "TP2 HIT - FULL TARGET", "win")
                 
-            elif trade.current_price >= trade.tp1 and trade.tp1_triggered:
-                # TP1 already handled by auto-manage, wait for TP2 or trail
-                pass
-                
         else:  # short
             if trade.current_price >= trade.stop_loss:
                 trade.status = "sl_hit"
@@ -277,13 +333,14 @@ class TradeMonitor:
     
     async def _close_trade(self, trade: ActiveTrade, reason: str, result: str):
         """Close trade and notify"""
-        emoji = "✅" if result == "win" else "❌"
+        emoji = "✅" if result == "win" else "❌" if result == "loss" else "⚠️"
         
-        # FIX: Proper timezone aware duration calculation
         duration = datetime.now(timezone.utc) - trade.entry_time
         hours, remainder = divmod(duration.seconds, 3600)
         minutes, _ = divmod(remainder, 60)
         duration_str = f"{hours}h {minutes}m"
+        
+        pnl_emoji = "🟢" if trade.pnl_percent > 0 else "🔴" if trade.pnl_percent < 0 else "⚪"
         
         message = (
             f"{emoji} <b>TRADE CLOSED - {reason}</b>\n\n"
@@ -291,7 +348,7 @@ class TradeMonitor:
             f"Direction: {trade.direction.upper()}\n"
             f"Entry: {trade.entry_price:,.2f}\n"
             f"Exit: {trade.current_price:,.2f}\n"
-            f"<b>P&L: {trade.pnl_percent:+.2f}%</b>\n"
+            f"{pnl_emoji} <b>P&L: {trade.pnl_percent:+.2f}%</b>\n"
             f"Duration: {duration_str}\n\n"
             f"<i>{datetime.now(timezone.utc).strftime('%H:%M:%S')} UTC</i>"
         )
@@ -310,7 +367,9 @@ class TradeMonitor:
             AlertType.TP1_APPROACHING: '🎯',
             AlertType.BREAKEVEN_TRIGGER: '✅',
             AlertType.TRAIL_STOP_TRIGGER: '📈',
-            AlertType.PARTIAL_CLOSE: '🔒'
+            AlertType.PARTIAL_CLOSE: '🔒',
+            AlertType.TIME_EXPIRING: '⏰',
+            AlertType.TIME_EXPIRED: '⏰'
         }
         
         emoji = emoji_map.get(alert_type, '⚠️')
