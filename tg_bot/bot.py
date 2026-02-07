@@ -1,5 +1,5 @@
 """
-Telegram Bot with Options Data Display
+Telegram Bot with Options Data Display - FIXED
 """
 
 import asyncio
@@ -15,7 +15,9 @@ class AlphaTelegramBot:
     def __init__(self, token: str, chat_id: str):
         self.bot = Bot(token=token) if token else None
         self.chat_id = chat_id
-        self.last_alert_time = {}
+        # FIX: Implement rate limiting
+        self.last_alert_time: Dict[str, datetime] = {}
+        self.min_alert_interval = 60  # seconds
     
     async def send_signal(self, setup: Dict, score: Dict, market_data: Dict):
         """Send trading signal with options data"""
@@ -58,23 +60,26 @@ class AlphaTelegramBot:
         else:
             position_str = str(position_size)
         
-        # Options data (NEW)
+        # FIX: Proper options data check
         options_data = data.get('options_data', {}) or setup.get('options_validation', {})
         options_section = ""
         
-        if options_data:
+        # FIX: Check if options_data has actual values
+        if options_data and any(v for v in options_data.values() if v is not None and v != 0):
             iv = options_data.get('iv', 0)
             premium = options_data.get('premium', 0)
             delta = options_data.get('delta', 0)
             oi = options_data.get('oi', 0)
             
-            options_section = (
-                f"\n📊 <b>Options Data (CoinDCX):</b>\n"
-                f"├ IV: {iv:.1f}%\n"
-                f"├ Premium: ${premium:.2f}\n"
-                f"├ Delta: {delta:.3f}\n"
-                f"└ OI: {oi:,.0f}\n"
-            )
+            # Only show section if we have meaningful data
+            if iv > 0 or premium > 0:
+                options_section = (
+                    f"\n📊 <b>Options Data (CoinDCX):</b>\n"
+                    f"├ IV: {iv:.1f}%\n"
+                    f"├ Premium: ${premium:.2f}\n"
+                    f"├ Delta: {delta:.3f}\n"
+                    f"└ OI: {oi:,.0f}\n"
+                )
         
         message = (
             f"{dir_emoji} <b>{asset} ALPHA SIGNAL</b> {asset_emoji}\n\n"
@@ -116,7 +121,7 @@ class AlphaTelegramBot:
         message += (
             f"\n⏱ <b>Valid:</b> 60 minutes\n"
             f"⚠️ <b>Risk:</b> 1% max per trade\n"
-            f"<i>Alpha Bot v3.2 | {current_time} UTC</i>"
+            f"<i>Alpha Bot v3.3 | {current_time} UTC</i>"
         )
         
         return message
@@ -137,9 +142,18 @@ class AlphaTelegramBot:
             logger.error(f"Status send error: {e}")
     
     async def send_alert(self, title: str, message: str, impact: str = "medium"):
-        """Send alert"""
+        """Send alert with rate limiting"""
         try:
             now = datetime.now(timezone.utc)
+            
+            # FIX: Rate limiting check
+            alert_key = f"{title}_{impact}"
+            last_time = self.last_alert_time.get(alert_key)
+            if last_time and (now - last_time).seconds < self.min_alert_interval:
+                logger.debug(f"Alert rate limited: {title}")
+                return
+            
+            self.last_alert_time[alert_key] = now
             
             impact_emoji = {
                 'low': 'ℹ️',
