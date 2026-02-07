@@ -1,6 +1,5 @@
 """
-WebSocket Manager - Optimized for Railway Hobby Plan
-Reduced memory, faster reconnect, efficient processing
+WebSocket Manager - FIXED with Thread-Safe Operations
 """
 
 import asyncio
@@ -9,6 +8,7 @@ import logging
 import websockets
 from typing import Dict, Callable
 from datetime import datetime, timezone
+from collections import deque
 
 logger = logging.getLogger(__name__)
 
@@ -21,7 +21,7 @@ class WebSocketManager:
         self.callbacks = {}
         self.running = False
         self.price_data: Dict[str, Dict] = {}
-        self.reconnect_delay = 3  # Start lower
+        self.reconnect_delay = 3
         self.connected = False
         self.message_count = 0
         self.last_cleanup = datetime.now(timezone.utc)
@@ -39,9 +39,8 @@ class WebSocketManager:
         
         for asset, config in enabled_assets.items():
             symbol = config['symbol'].lower()
-            # Reduced streams: only trade + depth (no 100ms for less CPU)
             streams.append(f"{symbol}@trade")
-            streams.append(f"{symbol}@depth20@250ms")  # 250ms instead of 100ms
+            streams.append(f"{symbol}@depth20@250ms")
         
         if not streams:
             logger.warning("No WebSocket streams configured")
@@ -60,12 +59,12 @@ class WebSocketManager:
             try:
                 async with websockets.connect(
                     url, 
-                    ping_interval=30,  # Increased from 20
-                    ping_timeout=15,   # Increased from 10
+                    ping_interval=30,
+                    ping_timeout=15,
                     close_timeout=10
                 ) as ws:
                     self.connected = True
-                    self.reconnect_delay = 3  # RESET on successful connect
+                    self.reconnect_delay = 3
                     logger.info("✅ WebSocket connected")
                     
                     async for message in ws:
@@ -94,7 +93,6 @@ class WebSocketManager:
                 self.connected = False
                 logger.error(f"WS error: {type(e).__name__}")
                 await asyncio.sleep(self.reconnect_delay)
-                # Exponential backoff with max 30s
                 self.reconnect_delay = min(self.reconnect_delay * 1.5, 30)
     
     def _cleanup_old_data(self):
@@ -104,11 +102,8 @@ class WebSocketManager:
             return
         
         for symbol in self.price_data:
-            # Keep only last 50 trades (was 100)
-            if 'trades' in self.price_data[symbol]:
-                trades = self.price_data[symbol]['trades']
-                if len(trades) > 50:
-                    self.price_data[symbol]['trades'] = trades[-50:]
+            # deque auto-truncates, no manual cleanup needed
+            pass
         
         self.last_cleanup = now
         logger.debug("Memory cleanup completed")
@@ -140,10 +135,10 @@ class WebSocketManager:
             logger.error(f"Process error: {e}")
     
     async def _handle_trade(self, symbol: str, data: Dict):
-        """Process trade - memory optimized"""
+        """Process trade - FIX: Use deque for thread safety"""
         if symbol not in self.price_data:
             self.price_data[symbol] = {
-                'trades': [], 
+                'trades': deque(maxlen=50),  # FIX: Thread-safe deque
                 'last_price': 0, 
                 'last_trade_time': 0
             }
@@ -152,16 +147,12 @@ class WebSocketManager:
             'price': float(data.get('p', 0)),
             'qty': float(data.get('q', 0)),
             'time': data.get('T', 0),
-            'm': data.get('m', False),  # is_buyer_maker
+            'm': data.get('m', False),
         }
         
         self.price_data[symbol]['trades'].append(trade)
         self.price_data[symbol]['last_price'] = trade['price']
         self.price_data[symbol]['last_trade_time'] = trade['time']
-        
-        # Keep only 50 trades
-        if len(self.price_data[symbol]['trades']) > 50:
-            self.price_data[symbol]['trades'] = self.price_data[symbol]['trades'][-50:]
         
         # Callback
         if symbol in self.callbacks:
@@ -174,7 +165,10 @@ class WebSocketManager:
         """Process orderbook - calculate OFI here"""
         try:
             if symbol not in self.price_data:
-                self.price_data[symbol] = {}
+                self.price_data[symbol] = {
+                    'trades': deque(maxlen=50),
+                    'last_price': 0
+                }
             
             raw_bids = data.get('bids', [])
             raw_asks = data.get('asks', [])
@@ -193,7 +187,12 @@ class WebSocketManager:
             bid_vol = sum(b[1] for b in bids)
             ask_vol = sum(a[1] for a in asks)
             total_vol = bid_vol + ask_vol
-            ofi = (bid_vol - ask_vol) / total_vol if total_vol > 0 else 0
+            
+            # FIX: Handle zero volume case better
+            if total_vol == 0:
+                ofi = 0
+            else:
+                ofi = (bid_vol - ask_vol) / total_vol
             
             # Calculate walls
             avg_bid = bid_vol / len(bids) if bids else 0
@@ -210,7 +209,7 @@ class WebSocketManager:
                 'ofi_ratio': ofi,
                 'bid_pressure': sum(b[0] * b[1] for b in bids),
                 'ask_pressure': sum(a[0] * a[1] for a in asks),
-                'bid_walls': bid_walls[:2],  # Top 2 only
+                'bid_walls': bid_walls[:2],
                 'ask_walls': ask_walls[:2],
             }
             
@@ -243,10 +242,13 @@ class WebSocketManager:
     def get_price_data(self, symbol: str) -> Dict:
         return self.price_data.get(symbol, {})
     
-    def get_recent_trades(self, symbol: str, limit: int = 30) -> list:  # Reduced from 50
+    def get_recent_trades(self, symbol: str, limit: int = 30) -> list:
+        """FIX: Properly convert deque to list"""
         data = self.price_data.get(symbol, {})
-        trades = data.get('trades', [])
-        return trades[-limit:] if trades else []
+        trades = data.get('trades', deque())
+        # FIX: Convert deque to list for slicing
+        trades_list = list(trades)
+        return trades_list[-limit:] if trades_list else []
     
     def get_last_price(self, symbol: str) -> float:
         data = self.price_data.get(symbol, {})
