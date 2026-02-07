@@ -1,13 +1,13 @@
 """
 Crypto Options Alpha Bot - with CoinDCX Integration
+FIXED VERSION - All Critical Bugs Resolved
 """
 
 import os
-import sys
 import asyncio
 import logging
 from datetime import datetime, timezone, timedelta
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Any
 from threading import Thread
 
 from flask import Flask, jsonify
@@ -33,6 +33,13 @@ from core.performance_tracker import PerformanceTracker
 from core.coindcx_client import init_coindcx_client
 from tg_bot.bot import AlphaTelegramBot
 
+# Constants
+WARMUP_SECONDS = 300
+CYCLE_INTERVAL_SECONDS = 45
+MIN_SCORE_THRESHOLD = 85
+MAX_SIGNALS_PER_HOUR = 2
+HEALTH_CHECK_INTERVAL = 60
+
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
@@ -46,7 +53,7 @@ def home():
     return {
         'status': 'sleeping' if bot and bot.is_sleeping else 'active',
         'bot': 'Crypto Options Alpha Bot',
-        'version': '3.2-coindcx',
+        'version': '3.3-fixed',
         'coindcx': 'connected' if COINDCX_API_KEY else 'not_configured',
         'timestamp': datetime.now(timezone.utc).isoformat()
     }
@@ -68,13 +75,15 @@ class AlphaBot:
         self.running = False
         self._components = None
         
-        # Initialize cycle counters here (FIX)
+        # FIX: Initialize all counters in __init__
         self.cycle_count = 0
         self.last_signal_time = None
         self.signals_sent_this_hour = 0
         self.hour_start = datetime.now(timezone.utc)
+        self.start_time = datetime.now(timezone.utc)  # FIX: For WARMUP
+        self._sleep_notified = False
         
-        # Initialize CoinDCX (NEW)
+        # Initialize CoinDCX
         if COINDCX_API_KEY and COINDCX_API_SECRET:
             init_coindcx_client(COINDCX_API_KEY, COINDCX_API_SECRET)
             logger.info("✅ CoinDCX client initialized")
@@ -98,9 +107,17 @@ class AlphaBot:
         
         return self._components
         
+    def _reset_hourly_counters(self):
+        """Reset hourly counters if hour changed"""
+        now = datetime.now(timezone.utc)
+        if now.hour != self.hour_start.hour or (now - self.hour_start).days > 0:
+            self.signals_sent_this_hour = 0
+            self.hour_start = now
+            logger.info("🔄 Hourly counters reset")
+        
     async def run(self):
         self.running = True
-        logger.info("🚀 Bot v3.2-COINDCX starting")
+        logger.info("🚀 Bot v3.3-FIXED starting")
         
         flask_thread = Thread(target=self._run_flask, daemon=True)
         flask_thread.start()
@@ -109,7 +126,7 @@ class AlphaBot:
         coindcx_status = "✅ Connected" if COINDCX_API_KEY else "❌ Not configured"
         try:
             await self.telegram.send_status(
-                f"🟢 Bot v3.2 Started\n"
+                f"🟢 Bot v3.3 Fixed Started\n"
                 f"CoinDCX: {coindcx_status}\n"
                 f"Real Options Data: {'Yes' if COINDCX_API_KEY else 'No'}\n"
                 f"Mode: Golden Hours Only"
@@ -122,13 +139,16 @@ class AlphaBot:
                 self.cycle_count += 1
                 cycle_start = datetime.now(timezone.utc)
                 
-                # WARMUP: 5 minutes
-                elapsed = (cycle_start - datetime.now(timezone.utc)).total_seconds()
-                if elapsed < 300:
-                    remaining = 300 - elapsed
-                    logger.info(f"⏸️ WARMUP: {remaining:.0f}s")
+                # FIX: Proper WARMUP calculation
+                elapsed = (cycle_start - self.start_time).total_seconds()
+                if elapsed < WARMUP_SECONDS:
+                    remaining = WARMUP_SECONDS - elapsed
+                    logger.info(f"⏸️ WARMUP: {remaining:.0f}s remaining")
                     await asyncio.sleep(min(60, remaining))
                     continue
+                
+                # Reset hourly counters if needed
+                self._reset_hourly_counters()
                 
                 # Check if should run or sleep
                 should_run, sleep_seconds, reason = self.time_filter.should_bot_run()
@@ -150,7 +170,7 @@ class AlphaBot:
         
         logger.info(f"😴 SLEEP: {reason} | {sleep_hours:.1f}h")
         
-        if not hasattr(self, '_sleep_notified'):
+        if not self._sleep_notified:
             await self.telegram.send_status(
                 f"😴 <b>Sleep Mode</b>\nReason: {reason}\n"
                 f"Duration: {sleep_hours:.1f}h\nNext: {self.next_run_time[:16]}"
@@ -172,37 +192,58 @@ class AlphaBot:
         
         await self.telegram.send_status("🌟 <b>Golden Hour Started</b>")
         
-        ws_task = asyncio.create_task(ws_manager.start(ASSETS_CONFIG))
-        await asyncio.sleep(3)
+        # FIX: Proper task management with cancellation
+        ws_task = None
+        monitor_task = None
         
-        monitor_task = asyncio.create_task(
-            comps['trade_monitor'].start_monitoring(self._get_current_price)
-        )
-        
-        session_active = True
-        while session_active and self.running:
-            try:
-                should_run, _, _ = self.time_filter.should_bot_run()
-                if not should_run:
-                    session_active = False
-                    break
-                
-                self.cycle_count += 1
-                
-                if self.signals_sent_this_hour >= 2:
-                    await asyncio.sleep(60)
-                    continue
-                
-                await self._process_cycle(comps)
-                await asyncio.sleep(45)
-                
-            except Exception as e:
-                logger.error(f"Trading error: {e}")
-                await asyncio.sleep(30)
-        
-        ws_manager.stop()
-        comps['trade_monitor'].stop_monitoring()
-        logger.info("Session ended")
+        try:
+            ws_task = asyncio.create_task(ws_manager.start(ASSETS_CONFIG))
+            await asyncio.sleep(3)
+            
+            monitor_task = asyncio.create_task(
+                comps['trade_monitor'].start_monitoring(self._get_current_price)
+            )
+            
+            session_active = True
+            while session_active and self.running:
+                try:
+                    should_run, _, _ = self.time_filter.should_bot_run()
+                    if not should_run:
+                        session_active = False
+                        break
+                    
+                    self._reset_hourly_counters()
+                    
+                    if self.signals_sent_this_hour >= MAX_SIGNALS_PER_HOUR:
+                        await asyncio.sleep(60)
+                        continue
+                    
+                    await self._process_cycle(comps)
+                    await asyncio.sleep(CYCLE_INTERVAL_SECONDS)
+                    
+                except Exception as e:
+                    logger.error(f"Trading error: {e}")
+                    await asyncio.sleep(30)
+                    
+        finally:
+            # FIX: Proper cleanup
+            ws_manager.stop()
+            if ws_task:
+                ws_task.cancel()
+                try:
+                    await ws_task
+                except asyncio.CancelledError:
+                    pass
+            
+            if monitor_task:
+                comps['trade_monitor'].stop_monitoring()
+                monitor_task.cancel()
+                try:
+                    await monitor_task
+                except asyncio.CancelledError:
+                    pass
+            
+            logger.info("Session ended")
     
     async def _process_cycle(self, comps: Dict):
         from strategies.liquidity_hunt import LiquidityHuntStrategy
@@ -238,6 +279,12 @@ class AlphaBot:
             if not context['trade_allowed']:
                 continue
             
+            # FIX: Check news status
+            news_ok, news_status = await news_guard.check_trading_allowed(asset)
+            if not news_ok:
+                logger.warning(f"News guard blocked {asset}: {news_status}")
+                continue
+            
             try:
                 strategy = LiquidityHuntStrategy(asset, ASSETS_CONFIG[asset])
                 recent_trades = ws_manager.get_recent_trades(ASSETS_CONFIG[asset]['symbol'], 30)
@@ -247,7 +294,7 @@ class AlphaBot:
                         'orderbook': data.orderbook,
                         'funding_rate': data.funding_rate,
                         'current_price': current_price,
-                        'options_data': data.options_data  # NEW
+                        'options_data': data.options_data
                     },
                     recent_trades
                 )
@@ -256,6 +303,7 @@ class AlphaBot:
                     setup['asset'] = asset
                     setup['current_price'] = current_price
                     setup['context'] = context
+                    setup['news_status'] = news_status  # FIX: Pass news status
                     signals.append(('liquidity_hunt', setup))
                     
             except Exception as e:
@@ -280,6 +328,7 @@ class AlphaBot:
             setup['target_1'] = current_price * 1.018 if setup['direction'] == 'long' else current_price * 0.982
             setup['target_2'] = current_price * 1.030 if setup['direction'] == 'long' else current_price * 0.970
             
+            # FIX: Pass news_status to scorer
             score = scorer.calculate_score(
                 setup,
                 {
@@ -287,6 +336,7 @@ class AlphaBot:
                     'funding_rate': data.funding_rate,
                     'spot_price': current_price
                 },
+                news_status=setup.get('news_status', 'safe'),
                 time_quality='excellent'
             )
             
@@ -301,7 +351,7 @@ class AlphaBot:
         best = scored[0]
         name, setup, score = best
         
-        if score['total_score'] < 85:
+        if score['total_score'] < MIN_SCORE_THRESHOLD:
             return
         
         position_size = comps['asset_manager'].calculate_position_size(
@@ -311,13 +361,15 @@ class AlphaBot:
         position_size *= setup.get('context', {}).get('position_size_mult', 1.0)
         setup['position_size'] = position_size
         
-        # Enhanced message with options data
+        # FIX: Proper options data check
         options_info = setup.get('options_validation', {})
+        if options_info and not any(options_info.values()):
+            options_info = None
         
         await self.telegram.send_signal(setup, score, {
             'orderbook': market_data[setup['asset']].orderbook,
             'position_size': position_size,
-            'options_data': options_info  # NEW
+            'options_data': options_info
         })
         
         trade = ActiveTrade(
