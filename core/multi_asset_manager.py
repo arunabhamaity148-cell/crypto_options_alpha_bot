@@ -1,11 +1,11 @@
 """
-Multi-Asset Manager with Risk-Based Sizing
+Multi-Asset Manager with Risk-Based Sizing - FIXED
 """
 
 import logging
 from typing import Dict, List, Tuple
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 
 logger = logging.getLogger(__name__)
 
@@ -39,19 +39,19 @@ class MultiAssetManager:
         self.active_assets = [a for a in config.get('assets', []) 
                              if assets_config.get(a, {}).get('enable', True)]
         self.daily_signals = {asset: 0 for asset in self.active_assets}
-        self.last_reset = datetime.now()
+        self.last_reset = datetime.now(timezone.utc)  # FIX: Timezone aware
         self.sent_signals = []
         self.active_directions = {}
         self.active_trades = {}
         
     def should_reset_daily(self) -> bool:
-        return (datetime.now() - self.last_reset).days >= 1
+        return (datetime.now(timezone.utc) - self.last_reset).days >= 1
     
     def reset_daily_counters(self):
         self.daily_signals = {asset: 0 for asset in self.active_assets}
         self.active_directions = {}
         self.active_trades = {}
-        self.last_reset = datetime.now()
+        self.last_reset = datetime.now(timezone.utc)
         logger.info("Daily counters reset")
     
     def can_send_signal(self, asset: str, direction: str = None, 
@@ -65,12 +65,16 @@ class MultiAssetManager:
                 logger.warning(f"🚫 {asset}: Opposite direction active")
                 return False
         
-        for sig in reversed(self.sent_signals):
-            if sig['asset'] == asset:
-                if (datetime.now() - sig['timestamp']).seconds < 3600:
-                    logger.warning(f"🚫 {asset}: 60min cooldown")
-                    return False
-                break
+        # FIX: Check all recent signals, not just last one
+        now = datetime.now(timezone.utc)
+        recent_signals = [
+            sig for sig in self.sent_signals
+            if sig['asset'] == asset
+            and (now - sig['timestamp']).total_seconds() < 3600
+        ]
+        if recent_signals:
+            logger.warning(f"🚫 {asset}: {len(recent_signals)} signals in last hour")
+            return False
         
         if asset in self.active_trades and entry_price:
             last = self.active_trades[asset]
@@ -88,7 +92,7 @@ class MultiAssetManager:
             'asset': asset,
             'direction': direction,
             'entry_price': entry_price,
-            'timestamp': datetime.now()
+            'timestamp': datetime.now(timezone.utc)  # FIX: Timezone aware
         })
         logger.info(f"✅ Recorded: {asset} {direction} @ {entry_price}")
     
@@ -114,6 +118,9 @@ class MultiAssetManager:
             return 0.1
         
         stop_distance = abs(entry - stop) / entry
+        if stop_distance == 0:
+            return 0.1
+        
         notional = risk_amount / stop_distance
         
         risk_multipliers = {
@@ -127,7 +134,9 @@ class MultiAssetManager:
             contracts = (notional / entry) * mult
             return round(contracts, 3)
         elif 'ETH' in asset:
-            contracts = (notional / entry) * mult * 10
+            # FIX: Removed arbitrary * 10 multiplier, added comment
+            # ETH contracts are typically 10x smaller than BTC
+            contracts = (notional / entry) * mult
             return round(contracts, 2)
         
         return round((notional / entry) * mult, 2)
