@@ -1,6 +1,6 @@
 """
-Crypto Options Alpha Bot - with CoinDCX Integration
-FIXED VERSION - All Critical Bugs Resolved
+Crypto Options Alpha Bot - v3.4 with FREE Upgrades
+Integrated: Market Regime, Multi-Timeframe, Adaptive Optimizer
 """
 
 import os
@@ -31,6 +31,9 @@ from core.trade_monitor import TradeMonitor, ActiveTrade
 from core.market_context import MarketContext
 from core.performance_tracker import PerformanceTracker
 from core.coindcx_client import init_coindcx_client
+from core.market_regime import regime_detector
+from core.multi_timeframe import mtf_analyzer
+from core.adaptive_optimizer import adaptive_optimizer
 from tg_bot.bot import AlphaTelegramBot
 
 # Constants
@@ -53,7 +56,7 @@ def home():
     return {
         'status': 'sleeping' if bot and bot.is_sleeping else 'active',
         'bot': 'Crypto Options Alpha Bot',
-        'version': '3.3-fixed',
+        'version': '3.4-upgraded',
         'coindcx': 'connected' if COINDCX_API_KEY else 'not_configured',
         'timestamp': datetime.now(timezone.utc).isoformat()
     }
@@ -66,6 +69,15 @@ def health():
         'timestamp': datetime.now(timezone.utc).isoformat()
     }, 200
 
+@flask_app.route('/stats')
+def stats():
+    """NEW: Show optimizer stats"""
+    global_stats = adaptive_optimizer.get_global_stats()
+    return {
+        'optimizer_stats': global_stats,
+        'timestamp': datetime.now(timezone.utc).isoformat()
+    }
+
 class AlphaBot:
     def __init__(self):
         self.telegram = AlphaTelegramBot(TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID)
@@ -75,12 +87,12 @@ class AlphaBot:
         self.running = False
         self._components = None
         
-        # FIX: Initialize all counters in __init__
+        # Initialize all counters in __init__
         self.cycle_count = 0
         self.last_signal_time = None
         self.signals_sent_this_hour = 0
         self.hour_start = datetime.now(timezone.utc)
-        self.start_time = datetime.now(timezone.utc)  # FIX: For WARMUP
+        self.start_time = datetime.now(timezone.utc)
         self._sleep_notified = False
         
         # Initialize CoinDCX
@@ -117,7 +129,7 @@ class AlphaBot:
         
     async def run(self):
         self.running = True
-        logger.info("🚀 Bot v3.3-FIXED starting")
+        logger.info("🚀 Bot v3.4-UPGRADED starting")
         
         flask_thread = Thread(target=self._run_flask, daemon=True)
         flask_thread.start()
@@ -126,9 +138,9 @@ class AlphaBot:
         coindcx_status = "✅ Connected" if COINDCX_API_KEY else "❌ Not configured"
         try:
             await self.telegram.send_status(
-                f"🟢 Bot v3.3 Fixed Started\n"
+                f"🟢 Bot v3.4 Upgraded Started\n"
+                f"Features: Regime + MTF + Adaptive\n"
                 f"CoinDCX: {coindcx_status}\n"
-                f"Real Options Data: {'Yes' if COINDCX_API_KEY else 'No'}\n"
                 f"Mode: Golden Hours Only"
             )
         except Exception as e:
@@ -139,7 +151,7 @@ class AlphaBot:
                 self.cycle_count += 1
                 cycle_start = datetime.now(timezone.utc)
                 
-                # FIX: Proper WARMUP calculation
+                # Proper WARMUP calculation
                 elapsed = (cycle_start - self.start_time).total_seconds()
                 if elapsed < WARMUP_SECONDS:
                     remaining = WARMUP_SECONDS - elapsed
@@ -192,7 +204,7 @@ class AlphaBot:
         
         await self.telegram.send_status("🌟 <b>Golden Hour Started</b>")
         
-        # FIX: Proper task management with cancellation
+        # Proper task management with cancellation
         ws_task = None
         monitor_task = None
         
@@ -226,7 +238,7 @@ class AlphaBot:
                     await asyncio.sleep(30)
                     
         finally:
-            # FIX: Proper cleanup
+            # Proper cleanup
             ws_manager.stop()
             if ws_task:
                 ws_task.cancel()
@@ -254,6 +266,23 @@ class AlphaBot:
         if comps['data_agg'] is None:
             comps['data_agg'] = DataAggregator(comps['stealth'])
         
+        # NEW: Multi-timeframe analysis
+        mtf_tasks = []
+        enabled_assets = [a for a, c in ASSETS_CONFIG.items() if c.get('enable')]
+        
+        for asset in enabled_assets:
+            mtf_tasks.append(mtf_analyzer.analyze(asset, self._fetch_ohlcv))
+        
+        mtf_results = {}
+        if mtf_tasks:
+            mtf_data = await asyncio.gather(*mtf_tasks, return_exceptions=True)
+            for i, result in enumerate(mtf_data):
+                asset = enabled_assets[i]
+                if isinstance(result, Exception):
+                    logger.error(f"MTF error for {asset}: {result}")
+                else:
+                    mtf_results[asset] = result
+        
         market_data = await comps['data_agg'].get_all_assets_data(ASSETS_CONFIG)
         ws_data = self._get_websocket_data()
         merged_data = self._merge_data(market_data, ws_data)
@@ -263,6 +292,25 @@ class AlphaBot:
         
         signals = []
         for asset, data in merged_data.items():
+            # NEW: Update regime detector
+            if data.spot_price > 0:
+                regime_detector.update_price(asset, data.spot_price)
+            
+            current_regime = regime_detector.detect_regime(asset)
+            regime_ok, regime_config = regime_detector.should_trade(asset)
+            
+            if not regime_ok:
+                logger.info(f"{asset}: Blocked by regime - {current_regime}")
+                continue
+            
+            # NEW: Check MTF alignment
+            mtf_result = mtf_results.get(asset, {})
+            mtf_score = mtf_result.get('confluence_score', 50)
+            
+            if mtf_score < 50:
+                logger.info(f"{asset}: MTF score too low - {mtf_score}")
+                continue
+            
             if not comps['asset_manager'].can_send_signal(asset):
                 continue
             
@@ -270,19 +318,19 @@ class AlphaBot:
             if current_price == 0:
                 continue
             
+            # NEW: Adjust setup by regime
             context = comps['market_context'].analyze({
                 'orderbook': data.orderbook,
                 'funding_rate': data.funding_rate,
-                'asset': asset
+                'asset': asset,
+                'regime': current_regime
             })
             
             if not context['trade_allowed']:
                 continue
             
-            # FIX: Check news status
             news_ok, news_status = await news_guard.check_trading_allowed(asset)
             if not news_ok:
-                logger.warning(f"News guard blocked {asset}: {news_status}")
                 continue
             
             try:
@@ -294,16 +342,49 @@ class AlphaBot:
                         'orderbook': data.orderbook,
                         'funding_rate': data.funding_rate,
                         'current_price': current_price,
-                        'options_data': data.options_data
+                        'options_data': data.options_data,
+                        'regime': current_regime
                     },
                     recent_trades
                 )
                 
                 if setup:
+                    # NEW: MTF alignment check
+                    signal_direction = setup.get('direction')
+                    mtf_aligned, mtf_mult = mtf_analyzer.check_signal_alignment(
+                        signal_direction, mtf_result
+                    )
+                    
+                    if not mtf_aligned:
+                        logger.info(f"{asset}: MTF direction mismatch")
+                        continue
+                    
+                    # NEW: Adaptive optimizer check
+                    should_trade, opt_mult, opt_reason = adaptive_optimizer.should_take_signal(setup)
+                    
+                    if not should_trade:
+                        logger.info(f"{asset}: Blocked by optimizer - {opt_reason}")
+                        continue
+                    
+                    # NEW: Apply regime adjustments
+                    setup = regime_detector.adjust_setup(setup, current_regime)
+                    
+                    # NEW: Combine multipliers
+                    setup['position_size_mult'] = (
+                        context.get('position_size_mult', 1.0) *
+                        regime_config.get('position_mult', 1.0) *
+                        mtf_mult *
+                        opt_mult
+                    )
+                    
                     setup['asset'] = asset
                     setup['current_price'] = current_price
                     setup['context'] = context
-                    setup['news_status'] = news_status  # FIX: Pass news status
+                    setup['news_status'] = news_status
+                    setup['regime'] = current_regime
+                    setup['mtf_score'] = mtf_score
+                    setup['optimizer_reason'] = opt_reason
+                    
                     signals.append(('liquidity_hunt', setup))
                     
             except Exception as e:
@@ -328,7 +409,6 @@ class AlphaBot:
             setup['target_1'] = current_price * 1.018 if setup['direction'] == 'long' else current_price * 0.982
             setup['target_2'] = current_price * 1.030 if setup['direction'] == 'long' else current_price * 0.970
             
-            # FIX: Pass news_status to scorer
             score = scorer.calculate_score(
                 setup,
                 {
@@ -339,6 +419,11 @@ class AlphaBot:
                 news_status=setup.get('news_status', 'safe'),
                 time_quality='excellent'
             )
+            
+            # NEW: Boost score by MTF alignment
+            mtf_score = setup.get('mtf_score', 50)
+            if mtf_score > 80:
+                score['total_score'] = min(95, score['total_score'] * 1.05)
             
             setup['score_data'] = score
             setup['total_score'] = score['total_score']
@@ -354,24 +439,43 @@ class AlphaBot:
         if score['total_score'] < MIN_SCORE_THRESHOLD:
             return
         
-        position_size = comps['asset_manager'].calculate_position_size(
+        # NEW: Apply combined position size multiplier
+        base_position = comps['asset_manager'].calculate_position_size(
             setup['asset'], setup['entry_price'], setup['stop_loss'],
             setup.get('context', {}).get('risk_level', 'normal')
         )
-        position_size *= setup.get('context', {}).get('position_size_mult', 1.0)
-        setup['position_size'] = position_size
         
-        # FIX: Proper options data check
+        final_size = base_position * setup.get('position_size_mult', 1.0)
+        setup['position_size'] = final_size
+        
+        # NEW: Prepare setup for optimizer tracking
+        setup_for_opt = {
+            'asset': setup['asset'],
+            'direction': setup['direction'],
+            'strategy': name,
+            'regime': setup.get('regime', 'unknown')
+        }
+        
+        # Log detailed info
+        logger.info(f"Signal {setup['asset']}: "
+                   f"Score={score['total_score']}, "
+                   f"Regime={setup.get('regime')}, "
+                   f"MTF={setup.get('mtf_score')}, "
+                   f"SizeMult={setup.get('position_size_mult', 1.0):.2f}, "
+                   f"Opt={setup.get('optimizer_reason')}")
+        
+        # Enhanced message with options data
         options_info = setup.get('options_validation', {})
-        if options_info and not any(options_info.values()):
+        if options_info and not any(v for v in options_info.values() if v is not None and v != 0):
             options_info = None
         
         await self.telegram.send_signal(setup, score, {
             'orderbook': market_data[setup['asset']].orderbook,
-            'position_size': position_size,
+            'position_size': final_size,
             'options_data': options_info
         })
         
+        # Create trade with optimizer tracking
         trade = ActiveTrade(
             asset=setup['asset'],
             direction=setup['direction'],
@@ -381,9 +485,15 @@ class AlphaBot:
             tp2=setup['target_2'],
             strike=setup['strike_selection'],
             expiry=datetime.now(timezone.utc) + timedelta(hours=48),
-            position_size=position_size,
+            position_size=final_size,
             auto_manage=True
         )
+        
+        # Store additional data for optimizer
+        trade.setup_key = adaptive_optimizer.extract_setup_key(setup_for_opt)
+        trade.regime = setup.get('regime')
+        trade.mtf_score = setup.get('mtf_score')
+        
         comps['trade_monitor'].add_trade(trade)
         
         comps['asset_manager'].record_signal(
@@ -423,6 +533,12 @@ class AlphaBot:
         if ws_data and 'last_price' in ws_data:
             return ws_data['last_price']
         return 0
+    
+    async def _fetch_ohlcv(self, asset: str, timeframe: str) -> List[Dict]:
+        """Fetch OHLCV data for MTF analysis"""
+        # TODO: Implement with your preferred data source
+        # For now, return empty list (MTF will use defaults)
+        return []
     
     def _run_flask(self):
         flask_app.run(host='0.0.0.0', port=PORT, threaded=True, debug=False, use_reloader=False)
